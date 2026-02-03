@@ -1,0 +1,4 @@
+---
+- name: Deploy Cloud Janitor App
+  debug:
+    msg: "Application deployment logic will be added here after building the Python app"

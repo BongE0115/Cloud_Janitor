@@ -39,6 +39,32 @@ provider "docker" {}
 resource "kind_cluster" "default" {
   name = "cloud-janitor-cluster"
   wait_for_ready = true
+  
+  # Host와 클러스터 간 포트 매핑 (자동으로 포트포워딩)
+  kind_config {
+    kind = "Cluster"
+    api_version = "kind.x-k8s.io/v1alpha4"
+    
+    node {
+      role = "control-plane"
+      
+      # Grafana (3000), Prometheus (9090), MySQL (3306) 포트 노출
+      extra_port_mappings {
+        container_port = 30080  # Grafana NodePort
+        host_port      = 3000   # localhost:3000으로 접속
+      }
+      
+      extra_port_mappings {
+        container_port = 30090  # Prometheus NodePort
+        host_port      = 9090   # localhost:9090으로 접속
+      }
+      
+      extra_port_mappings {
+        container_port = 30306  # MySQL NodePort
+        host_port      = 3306   # localhost:3306으로 접속
+      }
+    }
+  }
 }
 
 # 네임스페이스 생성 예시

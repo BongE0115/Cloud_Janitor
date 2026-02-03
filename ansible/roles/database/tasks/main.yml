@@ -1,0 +1,89 @@
+---
+# Uninstall existing MySQL if exists
+- name: Uninstall existing MySQL
+  ansible.builtin.command:
+    cmd: helm uninstall mysql --namespace default
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: mysql_uninstall
+  failed_when: false
+  changed_when: mysql_uninstall.rc == 0
+
+# Create MySQL deployment using official Docker image
+- name: Create MySQL ConfigMap for init script
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: mysql-init
+        namespace: default
+      data:
+        init.sql: |
+          CREATE DATABASE IF NOT EXISTS cloud_janitor;
+
+- name: Deploy MySQL StatefulSet
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: mysql
+        namespace: default
+      spec:
+        serviceName: mysql
+        replicas: 1
+        selector:
+          matchLabels:
+            app: mysql
+        template:
+          metadata:
+            labels:
+              app: mysql
+          spec:
+            containers:
+            - name: mysql
+              image: mysql:8.0
+              env:
+              - name: MYSQL_ROOT_PASSWORD
+                value: "rootpassword"
+              - name: MYSQL_DATABASE
+                value: "cloud_janitor"
+              ports:
+              - containerPort: 3306
+                name: mysql
+              volumeMounts:
+              - name: mysql-data
+                mountPath: /var/lib/mysql
+        volumeClaimTemplates:
+        - metadata:
+            name: mysql-data
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+
+- name: Create MySQL Service (NodePort for external access)
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: mysql
+        namespace: default
+      spec:
+        type: NodePort
+        ports:
+        - port: 3306
+          targetPort: 3306
+          nodePort: 30306
+          name: mysql
+        selector:
+          app: mysql

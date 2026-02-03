@@ -1,0 +1,15 @@
+---
+- name: Setup Cloud Janitor Cluster
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../../terraform/cloud-janitor-cluster-config"
+
+  roles:
+    - monitoring
+    - logging
+    - database
+    - app
+    - target-zombies

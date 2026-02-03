@@ -1,0 +1,43 @@
+---
+# Add Helm repository for Prometheus
+- name: Add Prometheus Community chart repo
+  ansible.builtin.command:
+    cmd: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: helm_repo_add
+  changed_when: "'already exists' not in helm_repo_add.stderr"
+  failed_when: helm_repo_add.rc != 0 and 'already exists' not in helm_repo_add.stderr
+
+# Update Helm repositories
+- name: Update Helm repositories
+  ansible.builtin.command:
+    cmd: helm repo update
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+# Uninstall existing Prometheus Stack if exists (to avoid conflicts)
+- name: Uninstall existing Prometheus Stack
+  ansible.builtin.command:
+    cmd: helm uninstall kube-prometheus-stack --namespace monitoring
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: prometheus_uninstall
+  failed_when: false
+  changed_when: prometheus_uninstall.rc == 0
+
+# Install Prometheus Stack (Prometheus + Grafana)
+- name: Install Prometheus Stack using Helm
+  ansible.builtin.command:
+    cmd: >
+      helm install kube-prometheus-stack 
+      prometheus-community/kube-prometheus-stack 
+      --namespace monitoring 
+      --create-namespace 
+      --values {{ playbook_dir }}/../roles/monitoring/values.yml
+      --timeout 15m
+      --wait
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: prometheus_install
+  changed_when: "'has been installed' in prometheus_install.stdout"

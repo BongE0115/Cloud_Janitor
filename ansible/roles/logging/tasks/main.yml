@@ -1,0 +1,31 @@
+---
+# Add Helm repository for Grafana
+- name: Add Grafana chart repo
+  ansible.builtin.command:
+    cmd: helm repo add grafana https://grafana.github.io/helm-charts
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: helm_repo_add
+  changed_when: "'already exists' not in helm_repo_add.stderr"
+  failed_when: helm_repo_add.rc != 0 and 'already exists' not in helm_repo_add.stderr
+
+# Update Helm repositories
+- name: Update Helm repositories
+  ansible.builtin.command:
+    cmd: helm repo update
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+
+# Install Loki Stack
+- name: Install Loki Stack using Helm
+  ansible.builtin.command:
+    cmd: >
+      helm upgrade --install loki 
+      grafana/loki-stack 
+      --namespace monitoring 
+      --create-namespace 
+      --wait
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: loki_install
+  changed_when: "'has been upgraded' in loki_install.stdout or 'has been installed' in loki_install.stdout"
