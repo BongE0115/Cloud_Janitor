@@ -1,0 +1,50 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfplan
+.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+terraform/cloud-janitor-cluster-config

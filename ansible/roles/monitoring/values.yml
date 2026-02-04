@@ -1,0 +1,41 @@
+---
+# Grafana datasource configuration - disable ALL automatic datasource creation
+grafana:
+  # Disable sidecar completely
+  sidecar:
+    datasources:
+      enabled: false
+      defaultDatasourceEnabled: false
+    
+  # Manually define ONLY ONE default datasource
+  additionalDataSources:
+    - name: Prometheus
+      type: prometheus
+      access: proxy
+      url: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+      isDefault: true
+      editable: false
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc:3100
+      isDefault: false
+      editable: false
+  
+  # Expose Grafana via NodePort (automatically accessible on localhost:3000)
+  service:
+    type: NodePort
+    nodePort: 30080
+
+# Expose Prometheus via NodePort (automatically accessible on localhost:9090)
+prometheus:
+  service:
+    type: NodePort
+    nodePort: 30090
+  prometheusSpec:
+    # This prevents the automatic Prometheus datasource from being created
+    disableCompaction: false
+
+# Ensure Alertmanager datasource is NOT default
+alertmanager:
+  enabled: true
