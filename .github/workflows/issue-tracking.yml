@@ -47,20 +47,23 @@ jobs:
             }
 
             // Helper function to update parent issues recursively
-            async function updateParentIssues(closedIssueNumber, shouldCheck) {
+            async function updateParentIssues(targetIssueNumber, shouldCheck) {
               const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const uncheckedTask = /^(\s*-\s\[)\s(\]\s.*)$/;
               const checkedTask   = /^(\s*-\s\[)[xX](\]\s.*)$/;
               
               // Find issues that reference this issue
-              const qBase = `repo:${owner}/${repo} is:issue is:open in:body`;
-              const issueUrl = `https://github.com/${owner}/${repo}/issues/${closedIssueNumber}`;
-              const q = `${qBase} "#${closedIssueNumber}" OR ${qBase} "${issueUrl}"`;
+              // For close: search open issues only (to check and close them)
+              // For reopen: search ALL issues including closed (to uncheck and reopen them)
+              const stateFilter = shouldCheck ? 'is:open' : 'is:issue';
+              const qBase = `repo:${owner}/${repo} ${stateFilter} in:body`;
+              const issueUrl = `https://github.com/${owner}/${repo}/issues/${targetIssueNumber}`;
+              const q = `${qBase} "#${targetIssueNumber}" OR ${qBase} "${issueUrl}"`;
               
               const searchRes = await github.rest.search.issuesAndPullRequests({ q, per_page: 50 });
-              const refRegex = new RegExp(`(?:#${closedIssueNumber}\\b|${esc(issueUrl)})`, 'i');
+              const refRegex = new RegExp(`(?:#${targetIssueNumber}\\b|${esc(issueUrl)})`, 'i');
               
-              const closedParents = [];
+              const affectedParents = [];
               
               for (const item of searchRes.data.items) {
                 if (item.pull_request) continue;
@@ -88,7 +91,7 @@ jobs:
                   await github.rest.issues.update({
                     owner, repo, issue_number: parentNumber, body: lines.join('\n'),
                   });
-                  core.info(`Updated checklist in #${parentNumber} (ref: #${closedIssueNumber})`);
+                  core.info(`Updated checklist in #${parentNumber} (ref: #${targetIssueNumber})`);
                 }
 
                 // Check if all tasks are now complete in this parent issue
@@ -97,22 +100,32 @@ jobs:
                 const hasTasks = tasks.length > 0;
                 const allChecked = hasTasks && tasks.every(isChecked);
                 
-                if (shouldCheck && hasTasks && allChecked && item.state !== 'closed') {
-                  await github.rest.issues.update({ owner, repo, issue_number: parentNumber, state: 'closed' });
-                  core.info(`Auto-closed #${parentNumber} (all tasks complete, triggered by #${closedIssueNumber})`);
-                  closedParents.push(parentNumber);
+                if (shouldCheck) {
+                  // CLOSE case: auto-close if all tasks complete
+                  if (hasTasks && allChecked && item.state !== 'closed') {
+                    await github.rest.issues.update({ owner, repo, issue_number: parentNumber, state: 'closed' });
+                    core.info(`Auto-closed #${parentNumber} (all tasks complete, triggered by #${targetIssueNumber})`);
+                    affectedParents.push(parentNumber);
+                  }
+                } else {
+                  // REOPEN case: auto-reopen if a task was unchecked and parent is closed
+                  if (changed && item.state === 'closed') {
+                    await github.rest.issues.update({ owner, repo, issue_number: parentNumber, state: 'open' });
+                    core.info(`Auto-reopened #${parentNumber} (task unchecked, triggered by #${targetIssueNumber})`);
+                    affectedParents.push(parentNumber);
+                  }
                 }
               }
               
-              return closedParents;
+              return affectedParents;
             }
             
-            // Recursive function to propagate changes up the hierarchy
+            // Recursive function to propagate changes up the hierarchy (child → parent)
             async function propagateUpHierarchy(issueNumbers, shouldCheck, depth = 0) {
               const maxDepth = 10; // Prevent infinite loops
               
               if (depth >= maxDepth) {
-                core.warning(`Max hierarchy depth (${maxDepth}) reached. Stopping propagation.`);
+                core.warning(`Max hierarchy depth (${maxDepth}) reached. Stopping upward propagation.`);
                 return;
               }
               
@@ -120,30 +133,129 @@ jobs:
                 return;
               }
               
-              core.info(`Propagating level ${depth + 1}: processing ${issueNumbers.length} issue(s)`);
+              core.info(`⬆️ Propagating UP level ${depth + 1}: processing ${issueNumbers.length} issue(s)`);
               
-              const newlyClosed = [];
+              const affectedParents = [];
               
               for (const issueNum of issueNumbers) {
-                const closedParents = await updateParentIssues(issueNum, shouldCheck);
-                newlyClosed.push(...closedParents);
+                const parents = await updateParentIssues(issueNum, shouldCheck);
+                affectedParents.push(...parents);
               }
               
               // Remove duplicates
-              const uniqueNewlyClosed = [...new Set(newlyClosed)];
+              const uniqueAffected = [...new Set(affectedParents)];
               
-              if (uniqueNewlyClosed.length > 0) {
-                core.info(`Level ${depth + 1}: ${uniqueNewlyClosed.length} parent issue(s) were auto-closed`);
-                // Recursively process the newly closed parents
-                await propagateUpHierarchy(uniqueNewlyClosed, shouldCheck, depth + 1);
+              if (uniqueAffected.length > 0) {
+                const actionVerb = shouldCheck ? 'auto-closed' : 'auto-reopened';
+                core.info(`⬆️ Level ${depth + 1}: ${uniqueAffected.length} parent issue(s) were ${actionVerb}`);
+                // Recursively process the affected parents
+                await propagateUpHierarchy(uniqueAffected, shouldCheck, depth + 1);
+              }
+            }
+            
+            // Helper function to extract child issue numbers from issue body
+            function extractChildIssues(body) {
+              const childIssues = [];
+              const issueRefRegex = /(?:#(\d+)|https:\/\/github\.com\/[^\/]+\/[^\/]+\/issues\/(\d+))/g;
+              
+              let match;
+              while ((match = issueRefRegex.exec(body)) !== null) {
+                const issueNum = parseInt(match[1] || match[2], 10);
+                if (!isNaN(issueNum) && !childIssues.includes(issueNum)) {
+                  childIssues.push(issueNum);
+                }
+              }
+              
+              return childIssues;
+            }
+            
+            // Helper function to update child issues (close/reopen them)
+            async function updateChildIssues(parentNumber, shouldClose) {
+              // Get the parent issue body
+              const { data: parentIssue } = await github.rest.issues.get({
+                owner, repo, issue_number: parentNumber
+              });
+              
+              const body = parentIssue.body || '';
+              const childNumbers = extractChildIssues(body);
+              
+              if (childNumbers.length === 0) {
+                return [];
+              }
+              
+              const affectedChildren = [];
+              const targetState = shouldClose ? 'closed' : 'open';
+              const oppositeState = shouldClose ? 'open' : 'closed';
+              
+              for (const childNum of childNumbers) {
+                try {
+                  // Get child issue current state
+                  const { data: childIssue } = await github.rest.issues.get({
+                    owner, repo, issue_number: childNum
+                  });
+                  
+                  // Only update if state needs to change
+                  if (childIssue.state === oppositeState) {
+                    await github.rest.issues.update({
+                      owner, repo, issue_number: childNum, state: targetState
+                    });
+                    
+                    const actionVerb = shouldClose ? 'closed' : 'reopened';
+                    core.info(`Auto-${actionVerb} child #${childNum} (triggered by parent #${parentNumber})`);
+                    affectedChildren.push(childNum);
+                  }
+                } catch (e) {
+                  // Issue might not exist or be inaccessible
+                  core.warning(`Could not update child #${childNum}: ${e.message}`);
+                }
+              }
+              
+              return affectedChildren;
+            }
+            
+            // Recursive function to propagate changes down the hierarchy (parent → child)
+            async function propagateDownHierarchy(issueNumbers, shouldClose, depth = 0) {
+              const maxDepth = 10; // Prevent infinite loops
+              
+              if (depth >= maxDepth) {
+                core.warning(`Max hierarchy depth (${maxDepth}) reached. Stopping downward propagation.`);
+                return;
+              }
+              
+              if (issueNumbers.length === 0) {
+                return;
+              }
+              
+              core.info(`⬇️ Propagating DOWN level ${depth + 1}: processing ${issueNumbers.length} issue(s)`);
+              
+              const affectedChildren = [];
+              
+              for (const issueNum of issueNumbers) {
+                const children = await updateChildIssues(issueNum, shouldClose);
+                affectedChildren.push(...children);
+              }
+              
+              // Remove duplicates
+              const uniqueAffected = [...new Set(affectedChildren)];
+              
+              if (uniqueAffected.length > 0) {
+                const actionVerb = shouldClose ? 'auto-closed' : 'auto-reopened';
+                core.info(`⬇️ Level ${depth + 1}: ${uniqueAffected.length} child issue(s) were ${actionVerb}`);
+                // Recursively process the affected children
+                await propagateDownHierarchy(uniqueAffected, shouldClose, depth + 1);
               }
             }
 
             // Start the recursive update from the current issue
             if (isClosed || isReopened) {
               const shouldCheck = isClosed;
-              core.info(`Starting hierarchical update for #${number} (${isClosed ? 'closed' : 'reopened'})`);
+              core.info(`Starting bidirectional hierarchical update for #${number} (${isClosed ? 'closed' : 'reopened'})`);
+              
+              // Propagate UP: update parent issues
               await propagateUpHierarchy([number], shouldCheck, 0);
+              
+              // Propagate DOWN: update child issues
+              await propagateDownHierarchy([number], shouldCheck, 0);
             }
 
             // Only proceed to project status updates on close/reopen
