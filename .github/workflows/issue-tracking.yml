@@ -1,0 +1,198 @@
+name: Project status check and update referencing tasks
+
+on:
+  issues:
+    types: [closed, reopened, edited]
+
+permissions:
+  contents: read
+  issues: write
+  repository-projects: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      STATUS_FIELD_NAME: "Status"
+      DONE_OPTION_NAME: "Done"
+      REOPEN_OPTION_NAME: "In Progress"
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const issue = context.payload.issue;
+            const number = issue.number;
+            const action = context.payload.action;
+            const isClosed = action === 'closed';
+            const isReopened = action === 'reopened';
+
+            // Checklist helpers
+            const taskLine = /^\s*[-*+]\s\[( |x|X)\]\s.+$/;
+            const isChecked = (line) => /\[[xX]\]/.test(line);
+
+            // If edited, auto-close this issue if all tasks are checked
+            if (action === 'edited') {
+              const bodyText = issue.body || '';
+              const selfLines = bodyText.split(/\r?\n/);
+              const selfTasks = selfLines.filter(l => taskLine.test(l));
+              const selfHasTasks = selfTasks.length > 0;
+              const selfAllChecked = selfHasTasks && selfTasks.every(isChecked);
+              if (selfHasTasks && selfAllChecked && issue.state !== 'closed') {
+                await github.rest.issues.update({ owner, repo, issue_number: number, state: 'closed' });
+                core.info(`Auto-closed #${number} after edit (all tasks complete)`);
+              }
+            }
+
+            // 1) Update checklist of referenced issues
+            const qBase = `repo:${owner}/${repo} is:issue is:open in:body`;
+            const q = `${qBase} "#${number}" OR ${qBase} "https://github.com/${owner}/${repo}/issues/${number}"`;
+            const searchRes = await github.rest.search.issuesAndPullRequests({ q, per_page: 50 });
+
+            const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const issueUrl = `https://github.com/${owner}/${repo}/issues/${number}`;
+            const refRegex = new RegExp(`(?:#${number}\\b|${esc(issueUrl)})`, 'i');
+            const uncheckedTask = /^\s*-\s\[\s\](\s.*)$/i;
+            const checkedTask   = /^\s*-\s\[x\](\s.*)$/i;
+
+            for (const item of searchRes.data.items) {
+              if (item.pull_request) continue;
+              const parentNumber = item.number;
+              const body = item.body || '';
+              const lines = body.split(/\r?\n/);
+              let changed = false;
+
+              for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!refRegex.test(line)) continue;
+
+                if (isClosed && uncheckedTask.test(line)) {
+                  lines[i] = line.replace(uncheckedTask, '$1[x]$2');
+                  changed = true;
+                } else if (isReopened && checkedTask.test(line)) {
+                  lines[i] = line.replace(checkedTask, '$1[ ]$2');
+                  changed = true;
+                }
+              }
+
+              if (changed) {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: parentNumber, body: lines.join('\n'),
+                });
+                core.info(`Updated checklist in #${parentNumber}`);
+              }
+
+              // Auto-close referencing issue if all tasks are checked
+              const effectiveLines = changed ? lines : body.split(/\r?\n/);
+              const tasks = effectiveLines.filter(l => taskLine.test(l));
+              const hasTasks = tasks.length > 0;
+              const allChecked = hasTasks && tasks.every(isChecked);
+              if (hasTasks && allChecked && item.state !== 'closed') {
+                await github.rest.issues.update({ owner, repo, issue_number: parentNumber, state: 'closed' });
+                core.info(`Auto-closed #${parentNumber} (all tasks complete)`);
+              }
+            }
+
+            // Only proceed to project status updates on close/reopen
+            if (!(isClosed || isReopened)) {
+              return;
+            }
+
+            // 2) Update project status of referenced issues
+            const statusFieldName = process.env.STATUS_FIELD_NAME || 'Status';
+            const doneOptionName = process.env.DONE_OPTION_NAME || 'Done';
+            const reopenOptionName = process.env.REOPEN_OPTION_NAME || 'In Progress';
+            const desiredOptionName = isClosed ? doneOptionName : reopenOptionName;
+
+            const data = await github.graphql(`
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $number) {
+                    id
+                    projectItems(first: 50) {
+                      nodes {
+                        id
+                        project {
+                          ... on ProjectV2 { id title }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            `, { owner, repo, number });
+
+            const items = data?.repository?.issue?.projectItems?.nodes || [];
+            if (items.length === 0) {
+              core.info('No project items to update.');
+              return;
+            }
+
+            const itemsByProject = items.reduce((acc, it) => {
+              const projectId = it.project?.id;
+              if (!projectId) return acc;
+              acc[projectId] = acc[projectId] || [];
+              acc[projectId].push(it.id);
+              return acc;
+            }, {});
+
+            for (const [projectId, itemIds] of Object.entries(itemsByProject)) {
+              const proj = await github.graphql(`
+                query($id: ID!) {
+                  node(id: $id) {
+                    ... on ProjectV2 {
+                      id
+                      title
+                      fields(first: 50) {
+                        nodes {
+                          ... on ProjectV2SingleSelectField {
+                            id
+                            name
+                            options { id name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `, { id: projectId });
+
+              const fields = proj?.node?.fields?.nodes || [];
+              const statusField = fields.find(f => f?.name?.toLowerCase() === statusFieldName.toLowerCase());
+              if (!statusField) {
+                core.info(`Project ${proj?.node?.title || projectId} has no field "${statusFieldName}". Skipping.`);
+                continue;
+              }
+              const option = statusField.options.find(o => o?.name?.toLowerCase() === desiredOptionName.toLowerCase());
+              if (!option) {
+                core.info(`Project ${proj?.node?.title || projectId} field "${statusFieldName}" has no option "${desiredOptionName}". Skipping.`);
+                continue;
+              }
+
+              for (const itemId of itemIds) {
+                try {
+                  await github.graphql(`
+                    mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: ID!) {
+                      updateProjectV2ItemFieldValue(input: {
+                        projectId: $projectId,
+                        itemId: $itemId,
+                        fieldId: $fieldId,
+                        value: { singleSelectOptionId: $optionId }
+                      }) {
+                        clientMutationId
+                      }
+                    }
+                  `, {
+                    projectId,
+                    itemId,
+                    fieldId: statusField.id,
+                    optionId: option.id,
+                  });
+                  core.info(`Updated project item ${itemId} -> ${desiredOptionName}`);
+                } catch (e) {
+                  core.warning(`Failed updating item ${itemId}: ${e.message}`);
+                }
+              }
+            }
