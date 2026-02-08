@@ -40,7 +40,21 @@ provider "helm" {
 provider "docker" {}
 
 # Kind 클러스터 생성 (Docker 컨테이너 기반 K8s)
+
+# Ensure any existing kind cluster with the same name is removed before creating a new one
+resource "null_resource" "pre_delete_kind" {
+  # change on every run so the provisioner runs each apply
+  triggers = {
+    force = timestamp()
+  }
+
+  provisioner "local-exec" {
+    command = "kind delete cluster --name cloud-janitor-cluster || true"
+  }
+}
+
 resource "kind_cluster" "default" {
+  depends_on = [null_resource.pre_delete_kind]
   name = "cloud-janitor-cluster"
   wait_for_ready = true
   
