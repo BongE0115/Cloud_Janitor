@@ -1,79 +1,55 @@
-import logging
-import sys
 import os
+import sys
+from dotenv import load_dotenv  # .env 파일에 정의된 환경 변수를 로드하기 위한 라이브러리
 
-# [시스템 경로 설정] 
-# py_Logic 폴더 안에 있는 config, janitor_logic 등을 불러오기 위해 경로를 등록합니다.
+# 프로젝트의 로직 폴더(py_Logic)를 파이썬 경로에 등록하여 임포트 가능하게 함
 sys.path.append(os.path.join(os.path.dirname(__file__), 'py_Logic'))
 
+# .env 파일의 내용을 환경 변수로 불러옴 (파일이 없어도 에러 없이 통과됨)
+load_dotenv()
+
 try:
-    from py_Logic import config
-    from py_Logic.janitor_logic import run_janitor_process
+    # 메인 소탕 로직이 담긴 함수를 임포트
+    from py_Logic.janitor_logic import run_janitor
 except ImportError as e:
-    print(f"❌ 모듈 로드 실패: {e}")
-    print("💡 py_Logic 폴더와 그 안의 파일들이 정확한 위치에 있는지 확인하세요.")
+    # 파일이 없거나 경로가 틀렸을 경우 에러 메시지 출력 후 종료
+    print(f"❌ 로직 파일을 로드할 수 없습니다: {e}")
     sys.exit(1)
 
-# =================================================================
-# [사용자 설정 구역] - 여기서 청소 기준과 환경을 제어합니다.
-# =================================================================
+def main():
+    # os.getenv('환경변수명', '기본값')을 사용하여 설정값을 가져옴
+    # 환경변수(.env 포함)가 설정되어 있지 않으면 우측의 기본값을 자동으로 사용함 (하드코딩 방지)
+    config = {
+        # --- [판정 기준] ---
+        "LIMIT_CPU_M": float(os.getenv('LIMIT_CPU_M', 10.0)),       # CPU 사용량 10m 미만 시 좀비 후보
+        "TIME_WINDOW_CPU": os.getenv('TIME_WINDOW_CPU', '2m'),      # CPU 평균 계산 시간 (2분 간격)
+        "LIMIT_NET_B": float(os.getenv('LIMIT_NET_B', 100.0)),     # 네트워크 100바이트 미만 시 좀비 후보
+        "TIME_WINDOW_NET": os.getenv('TIME_WINDOW_NET', '2m'),      # 네트워크 감시 시간 (2분 간격)
+        "LIMIT_MEM_MI": float(os.getenv('LIMIT_MEM_MI', 1.0)),      # 메모리 1MiB 미만 (로그 출력 및 참고용)
+        
+        # --- [비용 계산] ---
+        "COST_PER_CORE_HOUR": float(os.getenv('COST_PER_CORE_HOUR', 0.1)), # 시간당 1코어 사용 시 발생하는 비용 ($)
+        "DEFAULT_CPU_REQ": float(os.getenv('DEFAULT_CPU_REQ', 0.2)),       # 파드에 CPU 설정이 없을 때 적용할 기본값
 
-# --- 1. 좀비 파드 판정 수치 기준 ---
-# CPU 사용량이 이 수치보다 낮으면 '일 안 하는 파드'로 간주합니다. (단위: m = milliCPU)
-config.LIMIT_CPU_M = 10.0           
-# CPU를 감시할 시간 범위입니다. (예: "2m"은 최근 2분간의 평균치를 확인)
-config.TIME_WINDOW_CPU = "2m"       
+        # --- [데이터베이스 접속] ---
+        "DB_CONFIG": {
+            "host": os.getenv('DB_HOST', '127.0.0.1'),             # 데이터베이스 서버 주소
+            "user": os.getenv('DB_USER', 'root'),                  # 접속 계정 아이디
+            "password": os.getenv('DB_PASSWORD', '1234'),          # 접속 계정 비밀번호
+            "database": os.getenv('DB_NAME', 'janitor_db'),        # 사용할 데이터베이스 이름
+            "auth_plugin": "mysql_native_password"                 # MySQL 8.0 이상 호환을 위한 플러그인 설정
+        },
 
-# 네트워크 수신량이 이 수치보다 낮으면 '통신이 없는 파드'로 간주합니다. (단위: Bytes)
-config.LIMIT_NET_B = 100.0          
-# 네트워크 활동을 감시할 시간 범위입니다.
-config.TIME_WINDOW_NET = "2m"
+        # --- [인프라 제어] ---
+        "PROMETHEUS_URL": os.getenv('PROMETHEUS_URL', 'http://localhost:9999'), # 프로메테우스 접속 API 주소
+        "DRY_RUN": os.getenv('DRY_RUN', 'False').lower() == 'true',   # True일 경우 실제 삭제 없이 목록만 확인
+        "WHITE_LIST_NS": ['kube-system', 'prometheus', 'local-path-storage', 'monitoring'], # 삭제 방지 보호 네임스페이스
+        "TARGET_NAMESPACES": ['default', 'zombie-zone']              # 좀비를 탐색할 대상 네임스페이스
+    }
 
-# --- 2. 비용 계산 및 실행 모드 설정 ---
-# 1개 코어(1000m)를 1시간 동안 사용했을 때 발생하는 비용 (US 달러 기준)
-config.COST_PER_CORE_HOUR = 0.1     
-# 파드 설정에 CPU 요청량(Request)이 없을 경우, 비용 계산을 위해 적용할 기본값 (0.2 = 200m)
-config.DEFAULT_CPU_REQ = 0.2        
-# [중요] DRY_RUN 설정
-# True: 삭제는 하지 않고 어떤 파드가 좀비인지 목록만 출력 (테스트용)
-# False: 좀비 파드를 발견 즉시 삭제하고 DB에 기록 (실전용)
-config.DRY_RUN = True             
-
-# --- 3. 대상 네임스페이스(구역) 설정 ---
-# 절대 건드리지 말아야 할 안전 구역 (보통 시스템 인프라 관련 네임스페이스)
-config.WHITE_LIST_NS = [
-    'kube-system', 
-    'prometheus', 
-    'local-path-storage', 
-    'monitoring'
-]
-# 좀비 파드를 찾아내서 청소할 대상 구역
-config.TARGET_NAMESPACES = [
-    'default', 
-    'zombie-zone', 
-    'target-workloads'
-]
-
-# --- 4. 외부 시스템 연결 정보 ---
-# 지표를 가져올 프로메테우스 서버 주소 (포트 포워딩 상태여야 함)
-config.PROMETHEUS_URL = "http://localhost:9090"
-
-# 청소 내역(Billing Log)을 저장할 MySQL 데이터베이스 정보
-config.DB_CONFIG = {
-    "host": "127.0.0.1",              # DB 서버 주소
-    "user": "root",                   # 접속 계정
-    "password": "1234",               # 비밀번호
-    "database": "janitor_db",         # 데이터베이스 이름
-    "auth_plugin": "mysql_native_password"
-}
-# =================================================================
+    # 취합된 모든 설정 정보(config)를 로직 실행 함수로 전달
+    run_janitor(config)
 
 if __name__ == "__main__":
-    # 로그 출력 형식 설정 (시간 [로그레벨] 메시지)
-    logging.basicConfig(
-        level=logging.INFO, 
-        format='%(asctime)s [%(levelname)s] %(message)s'
-    )
-    
-    # 설정된 모든 값을 가지고 실제 소탕 로직(janitor_logic)을 실행합니다.
-    run_janitor_process()
+    # 프로그램 실행 시 가장 먼저 main 함수 호출
+    main()

@@ -1,54 +1,62 @@
-# janitor_logic.py (위치: py_Logic 폴더 안)
 import logging
-from datetime import datetime, timezone
-from kubernetes import client, config as k8s_config
+from .metrics import get_k8s_client, get_prom_val
+from .database import save_billing_and_delete
 
-# 같은 폴더 내 모듈 임포트
-import config
-import metrics
-import database
-
+# 로그 기록 방식 설정
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("SuperJanitor")
 
-# 🌟 이 함수 이름이 main.py에서 부르는 이름과 정확히 일치해야 합니다.
-def run_janitor_process():
+def run_janitor(config):
+    """클러스터를 스캔하고 기준에 미달하는 좀비 파드를 찾아 삭제합니다."""
+    
+    # metrics.py에 정의한 함수를 통해 자동으로 인증된 K8s 클라이언트를 가져옴
+    v1 = get_k8s_client()
+    if not v1:
+        logger.error("❌ 쿠버네티스 인증 실패: .kube/config 파일이나 SA 권한을 확인하세요.")
+        return
+
+    logger.info(f"🎯 소탕 작전 시작 (모드: {'테스트' if config['DRY_RUN'] else '실전'})")
+    
     try:
-        # 쿠버네티스 설정 로드
-        k8s_config.load_kube_config()
-        v1 = client.CoreV1Api()
-        
-        logger.info(f"🎯 소탕 작전 시작 (모드: {'테스트' if config.DRY_RUN else '실전'})")
-        
+        # 클러스터 내의 모든 파드 목록 조회
         all_pods = v1.list_pod_for_all_namespaces().items
-        print(f"\n{'NAMESPACE':<15} {'POD NAME':<35} {'CPU(m)':>8} {'NET(B)':>8} {'DECISION'}")
-        print("-" * 100)
-        
-        for pod in all_pods:
-            ns, name = pod.metadata.namespace, pod.metadata.name
-            
-            # 지표 수집 (metrics.py 활용)
-            m = metrics.get_pod_metrics(ns, name)
-            
-            # 좀비 판정 로직
-            if ns in config.WHITE_LIST_NS:
-                decision = "✅ SAFE"
-            elif ns in config.TARGET_NAMESPACES and m['cpu'] < config.LIMIT_CPU_M and m['net'] < config.LIMIT_NET_B:
-                decision = "🚨 ZOMBIE"
-            else:
-                decision = "👍 ACTIVE"
-
-            print(f"{ns:<15} {name[:35]:<35} {m['cpu']:>8.2f} {m['net']:>8.2f} {decision}")
-
-            # 실전 모드(DRY_RUN=False)일 때 삭제 및 DB 저장
-            if decision == "🚨 ZOMBIE" and not config.DRY_RUN:
-                creation_ts = pod.metadata.creation_timestamp
-                alive_sec = int((datetime.now(timezone.utc) - creation_ts).total_seconds())
-                cost = config.DEFAULT_CPU_REQ * (alive_sec / 3600) * config.COST_PER_CORE_HOUR
-                
-                # DB 저장 (database.py 활용)
-                if database.save_log(name, ns, alive_sec, cost):
-                    v1.delete_namespaced_pod(name=name, namespace=ns)
-                    logger.info(f"💥 [삭제 완료] {name} (비용: ${cost:.5f})")
-                    
     except Exception as e:
-        logger.error(f"❌ 실행 중 오류 발생: {e}")
+        logger.error(f"❌ 파드 목록 조회 중 오류 발생: {e}")
+        return
+
+    # 화면 출력용 헤더 (표 형식)
+    print(f"\n{'NAMESPACE':<15} {'POD NAME':<35} {'CPU(m)':>8} {'MEM(Mi)':>8} {'NET(B)':>8} {'DECISION'}")
+    print("-" * 115)
+
+    for pod in all_pods:
+        ns, name = pod.metadata.namespace, pod.metadata.name
+        
+        # 프로메테우스 쿼리 준비
+        cpu_q = f'sum(rate(container_cpu_usage_seconds_total{{pod="{name}",namespace="{ns}"}}[{config["TIME_WINDOW_CPU"]}])) * 1000'
+        mem_q = f'sum(container_memory_working_set_bytes{{pod="{name}",namespace="{ns}"}}) / 1024 / 1024'
+        net_q = f'sum(rate(container_network_receive_bytes_total{{pod="{name}",namespace="{ns}"}}[{config["TIME_WINDOW_NET"]}]))'
+
+        # 지표 데이터 수집
+        cpu_val = get_prom_val(config['PROMETHEUS_URL'], cpu_q)
+        mem_val = get_prom_val(config['PROMETHEUS_URL'], mem_q)
+        net_val = get_prom_val(config['PROMETHEUS_URL'], net_q)
+
+        # 판정 단계
+        if ns in config['WHITE_LIST_NS']:
+            decision = "✅ SAFE (WhiteList)"
+        elif ns in config['TARGET_NAMESPACES'] and cpu_val < config['LIMIT_CPU_M'] and net_val < config['LIMIT_NET_B']:
+            decision = "🚨 ZOMBIE DETECTED"
+        else:
+            decision = "👍 ACTIVE"
+
+        # 결과 한 줄 출력
+        print(f"{ns:<15} {name[:35]:<35} {cpu_val:>8.2f} {mem_val:>8.2f} {net_val:>8.2f} {decision}")
+
+        # 좀비로 판정될 경우 DB 저장 및 실제 삭제 수행
+        if decision == "🚨 ZOMBIE DETECTED" and not config['DRY_RUN']:
+            success, val, sec = save_billing_and_delete(v1, pod, config)
+            if success:
+                logger.info(f"💰 [DB 기록 완료] {name}: ${val:.5f} (생존: {sec}초)")
+                logger.info(f"💥 [삭제 성공] {ns}/{name}")
+            else:
+                logger.error(f"❌ 작업 중 오류 발생: {val}")
