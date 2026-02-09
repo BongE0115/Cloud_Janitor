@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: janitor-config
+  namespace: default
+data:
+  # 실행 모드 (false = 실전 삭제 모드 / true = 테스트 모드)
+  DRY_RUN: "true"
+  
+  # 좀비 판정 기준
+  LIMIT_CPU_M: "10.0"
+  LIMIT_NET_B: "100.0"
+  
+  # K8s 내부에서 프로메테우스를 찾을 주소 
+  # (주의: 프로메테우스 서비스 이름이 다르면 수정 필요. 보통 'prometheus-server' 또는 'prometheus-k8s')
+  PROMETHEUS_URL: "http://prometheus-server.monitoring.svc.cluster.local:80"
+  
+  # 타겟 네임스페이스
+  TARGET_NAMESPACES: "default,zombie-zone,target-workloads"
