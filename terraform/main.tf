@@ -18,10 +18,10 @@ terraform {
       source  = "kreuzwerker/docker"
       version = "~> 3.0"
     }
-    grafana = {
-      source = "grafana/grafana"
-      version = "3.7.0"
-    }
+    #grafana = {
+     # source = "grafana/grafana"
+      #version = "3.7.0"
+    #}
   }
 }
 
@@ -67,10 +67,10 @@ resource "kind_cluster" "default" {
       role = "control-plane"
       
       # Grafana (3000), Prometheus (9090), MySQL (3306) 포트 노출
-      extra_port_mappings {
-        container_port = 30080  # Grafana NodePort
-        host_port      = 3000   # localhost:3000으로 접속
-      }
+      #extra_port_mappings {
+       # container_port = 30080  # Grafana NodePort
+       # host_port      = 3000   # localhost:3000으로 접속
+      #}
       
       extra_port_mappings {
         container_port = 30090  # Prometheus NodePort
