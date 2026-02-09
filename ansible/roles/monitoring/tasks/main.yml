@@ -1,60 +1,41 @@
----
-# Add Helm repository for Prometheus
-- name: Add Prometheus Community chart repo
-  ansible.builtin.command:
-    cmd: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-  environment:
-    KUBECONFIG: "{{ kubeconfig }}"
-  register: helm_repo_add
-  changed_when: "'already exists' not in helm_repo_add.stderr"
-  failed_when: helm_repo_add.rc != 0 and 'already exists' not in helm_repo_add.stderr
-
-# Update Helm repositories
-- name: Update Helm repositories
-  ansible.builtin.command:
-    cmd: helm repo update
-  environment:
-    KUBECONFIG: "{{ kubeconfig }}"
-
-# Uninstall existing Prometheus Stack if exists (to avoid conflicts)
-- name: Uninstall existing Prometheus Stack
-  ansible.builtin.command:
-    cmd: helm uninstall kube-prometheus-stack --namespace monitoring
-  environment:
-    KUBECONFIG: "{{ kubeconfig }}"
-  register: prometheus_uninstall
-  failed_when: false
-  changed_when: prometheus_uninstall.rc == 0
-
-# Install Prometheus Stack (Prometheus + Grafana)
+# 1. [설치] Helm으로 설치 
 - name: Install Prometheus Stack using Helm
   ansible.builtin.command:
     cmd: >
-      helm install kube-prometheus-stack 
+      helm upgrade --install kube-prometheus-stack 
       prometheus-community/kube-prometheus-stack 
       --namespace monitoring 
       --create-namespace 
       --values {{ playbook_dir }}/../roles/monitoring/values.yml
       --timeout 15m
       --wait
+
   environment:
     KUBECONFIG: "{{ kubeconfig }}"
   register: prometheus_install
   changed_when: "'has been installed' in prometheus_install.stdout"
 
-
-
+# 2. [대기] 그라파나 뜰 때까지 기다림
 - name: Grafana가 뜰 때까지 대기 (포트 3000)
   wait_for:
     port: 3000
     delay: 10
 
-- name: Loki 데이터소스 자동 등록 (Terraform 대신 Ansible이 수행)
+# 3. [조회] 쿠버네티스 비밀상자(Secret)에서 랜덤 비밀번호 꺼내오기 🕵️‍♂️
+- name: Get Grafana Random Password from K8s Secret
+  ansible.builtin.shell: >
+    kubectl get secret --namespace monitoring kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}" | base64 --decode
+  environment:
+    KUBECONFIG: "{{ kubeconfig }}"
+  register: grafana_secret_output
+
+# 4. [설정] 꺼내온 비밀번호로 로그인해서 Loki 등록하기 🤖
+- name: Loki 데이터소스 자동 등록
   uri:
     url: "http://localhost:3000/api/datasources"
     method: POST
     user: admin
-    password: "{{ grafana_password }}"  # hosts.yml 등 변수에서 가져옴
+    password: "{{ grafana_secret_output.stdout }}"  
     force_basic_auth: yes
     body_format: json
     body:
@@ -63,7 +44,15 @@
       url: "http://loki.logging.svc.cluster.local:3100"
       access: proxy
       isDefault: true
-    status_code: 200, 409  # 409는 '이미 있음'이므로 성공으로 간주
+    status_code: [200, 409]
 
-
-
+# 5. [출력] 사용자에게 비밀번호 알려주기 📢
+- name: "🎉 설치 완료! 아래 정보로 로그인하세요"
+  ansible.builtin.debug:
+    msg: 
+      - "---------------------------------------------------"
+      - "🚀 Grafana URL: http://localhost:3000"
+      - "👤 ID: admin"
+      - "🔑 PW: {{ grafana_secret_output.stdout }}"
+      - "---------------------------------------------------"
+      - "위 비밀번호를 복사해서 로그인하세요!"

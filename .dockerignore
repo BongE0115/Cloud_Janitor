@@ -1,0 +1,6 @@
+terraform/
+ansible/
+.git/
+__pycache__/
+*.tfstate
+*.tfstate.backup
