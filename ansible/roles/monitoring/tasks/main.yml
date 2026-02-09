@@ -41,3 +41,29 @@
     KUBECONFIG: "{{ kubeconfig }}"
   register: prometheus_install
   changed_when: "'has been installed' in prometheus_install.stdout"
+
+
+
+- name: Grafana가 뜰 때까지 대기 (포트 3000)
+  wait_for:
+    port: 3000
+    delay: 10
+
+- name: Loki 데이터소스 자동 등록 (Terraform 대신 Ansible이 수행)
+  uri:
+    url: "http://localhost:3000/api/datasources"
+    method: POST
+    user: admin
+    password: "{{ grafana_password }}"  # hosts.yml 등 변수에서 가져옴
+    force_basic_auth: yes
+    body_format: json
+    body:
+      name: Loki
+      type: loki
+      url: "http://loki.logging.svc.cluster.local:3100"
+      access: proxy
+      isDefault: true
+    status_code: 200, 409  # 409는 '이미 있음'이므로 성공으로 간주
+
+
+
