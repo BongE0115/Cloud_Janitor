@@ -12,8 +12,8 @@
 
   environment:
     KUBECONFIG: "{{ kubeconfig }}"
-  register: prometheus_install
-  changed_when: "'has been installed' in prometheus_install.stdout"
+  register: monitoring_prometheus_install
+  changed_when: "'has been installed' in monitoring_prometheus_install.stdout"
 
 # 그라파나 뜰 때까지 기다림
 - name: Wait for Grafana to be ready (port 3000)
@@ -21,13 +21,17 @@
     port: 3000
     delay: 10
 
-# 3. [조회] 쿠버네티스 비밀상자(Secret)에서 랜덤 비밀번호 꺼내오기 🕵️‍♂️
-- name: Get Grafana Random Password from K8s Secret
-  ansible.builtin.shell: >
-    kubectl get secret --namespace monitoring kube-prometheus-stack-grafana -o jsonpath="{.data.admin-password}" | base64 --decode
-  environment:
-    KUBECONFIG: "{{ kubeconfig }}"
-  register: grafana_secret_output
+# 쿠버네티스 Secret에서 랜덤 비밀번호 꺼내오기
+- name: Get Grafana Secret from K8s
+  kubernetes.core.k8s_info:
+    kind: Secret
+    name: kube-prometheus-stack-grafana
+    namespace: monitoring
+  register: monitoring_grafana_secret_raw
+
+- name: Set Grafana Password Fact
+  ansible.builtin.set_fact:
+    monitoring_grafana_admin_password: "{{ monitoring_grafana_secret_raw.resources[0].data['admin-password'] | b64decode }}"
 
 # 비밀번호로 로그인해서 Loki 등록
 - name: Loki 데이터소스 자동 등록
@@ -35,7 +39,7 @@
     url: "http://localhost:3000/api/datasources"
     method: POST
     user: admin
-    password: "{{ grafana_secret_output.stdout }}"
+    password: "{{ monitoring_grafana_admin_password.stdout }}"
     force_basic_auth: true
     body_format: json
     body:
@@ -53,5 +57,5 @@
       - "---------------------------------------------------"
       - "Grafana URL: http://localhost:3000"
       - "ID: admin"
-      - "PW: {{ grafana_secret_output.stdout }}"
+      - "PW: {{ monitoring_grafana_admin_password.stdout }}"
       - "---------------------------------------------------"
