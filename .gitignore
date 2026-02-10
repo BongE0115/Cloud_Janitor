@@ -2,9 +2,13 @@
 .terraform/
 *.tfstate
 *.tfstate.backup
+*.tfstate.*.backup
 *.tfvars
 *.tfplan
 .terraform.lock.hcl
+
+# Environment
+.env
 
 # Python
 __pycache__/
