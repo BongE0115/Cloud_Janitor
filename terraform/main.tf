@@ -14,16 +14,12 @@ terraform {
       source  = "hashicorp/helm"
       version = "~> 2.0"
     }
-    docker = {
-      source  = "kreuzwerker/docker"
-      version = "~> 3.0"
-    }
-    #grafana = {
-     # source = "grafana/grafana"
-      #version = "3.7.0"
-    #}
   }
 }
+
+# =============================================================================
+# Providers
+# =============================================================================
 
 provider "kind" {}
 
@@ -37,55 +33,46 @@ provider "helm" {
   }
 }
 
-provider "docker" {}
-
-# Kind 클러스터 생성 (Docker 컨테이너 기반 K8s)
-
-# Ensure any existing kind cluster with the same name is removed before creating a new one
-resource "null_resource" "pre_delete_kind" {
-  # change on every run so the provisioner runs each apply
-  triggers = {
-    force = timestamp()
-  }
-
-  provisioner "local-exec" {
-    command = "kind delete cluster --name cloud-janitor-cluster || true"
-  }
-}
+# =============================================================================
+# Kind Cluster (Docker 기반 K8s)
+# =============================================================================
+# NOTE: 클러스터가 이미 존재하면 Terraform이 멱등하게 관리합니다.
+#       수동 삭제가 필요하면: kind delete cluster --name cloud-janitor-cluster
 
 resource "kind_cluster" "default" {
-  depends_on = [null_resource.pre_delete_kind]
-  name = "cloud-janitor-cluster"
+  name           = "cloud-janitor-cluster"
   wait_for_ready = true
-  
-  # Host와 클러스터 간 포트 매핑 (자동으로 포트포워딩)
+
   kind_config {
-    kind = "Cluster"
+    kind        = "Cluster"
     api_version = "kind.x-k8s.io/v1alpha4"
-    
+
     node {
       role = "control-plane"
-      
-      #Grafana (3000), Prometheus (9090), MySQL (3306) 포트 노출
+
+      # Grafana (3000), Prometheus (9090), MySQL (3306) 포트 노출
       extra_port_mappings {
-        container_port = 30080  # Grafana NodePort
-        host_port      = 3000   # localhost:3000으로 접속
+        container_port = 30080 # Grafana NodePort
+        host_port      = 3000  # localhost:3000
       }
-      
+
       extra_port_mappings {
-        container_port = 30090  # Prometheus NodePort
-        host_port      = 9090   # localhost:9090으로 접속
+        container_port = 30090 # Prometheus NodePort
+        host_port      = 9090  # localhost:9090
       }
-      
+
       extra_port_mappings {
-        container_port = 30306  # MySQL NodePort
-        host_port      = 3306   # localhost:3306으로 접속
+        container_port = 30306 # MySQL NodePort
+        host_port      = 3306  # localhost:3306
       }
     }
   }
 }
 
-# 네임스페이스 생성 예시
+# =============================================================================
+# Namespaces
+# =============================================================================
+
 resource "kubernetes_namespace" "monitoring" {
   metadata {
     name = "monitoring"
