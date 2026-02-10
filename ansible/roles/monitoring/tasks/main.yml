@@ -46,13 +46,12 @@
       isDefault: true
     status_code: [200, 409]
 
-# 5. [출력] 사용자에게 비밀번호 알려주기 📢
-- name: "🎉 설치 완료! 아래 정보로 로그인하세요"
+# 사용자에게 비밀번호 알려주기
+- name: "Show Grafana Login Info"
   ansible.builtin.debug:
     msg:
       - "---------------------------------------------------"
-      - "🚀 Grafana URL: http://localhost:3000"
-      - "👤 ID: admin"
-      - "🔑 PW: {{ grafana_secret_output.stdout }}"
+      - "Grafana URL: http://localhost:3000"
+      - "ID: admin"
+      - "PW: {{ grafana_secret_output.stdout }}"
       - "---------------------------------------------------"
-      - "위 비밀번호를 복사해서 로그인하세요!"
