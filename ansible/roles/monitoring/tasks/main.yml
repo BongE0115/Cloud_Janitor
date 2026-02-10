@@ -15,9 +15,9 @@
   register: prometheus_install
   changed_when: "'has been installed' in prometheus_install.stdout"
 
-# 2. [대기] 그라파나 뜰 때까지 기다림
-- name: Grafana가 뜰 때까지 대기 (포트 3000)
-  wait_for:
+# 그라파나 뜰 때까지 기다림
+- name: Wait for Grafana to be ready (port 3000)
+  ansible.builtin.wait_for:
     port: 3000
     delay: 10
 
@@ -31,7 +31,7 @@
 
 # 4. [설정] 꺼내온 비밀번호로 로그인해서 Loki 등록하기 🤖
 - name: Loki 데이터소스 자동 등록
-  uri:
+  ansible.builtin.uri:
     url: "http://localhost:3000/api/datasources"
     method: POST
     user: admin
