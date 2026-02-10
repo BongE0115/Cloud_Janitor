@@ -29,14 +29,14 @@
     KUBECONFIG: "{{ kubeconfig }}"
   register: grafana_secret_output
 
-# 4. [설정] 꺼내온 비밀번호로 로그인해서 Loki 등록하기 🤖
+# 비밀번호로 로그인해서 Loki 등록
 - name: Loki 데이터소스 자동 등록
   ansible.builtin.uri:
     url: "http://localhost:3000/api/datasources"
     method: POST
     user: admin
     password: "{{ grafana_secret_output.stdout }}"
-    force_basic_auth: yes
+    force_basic_auth: true
     body_format: json
     body:
       name: Loki
