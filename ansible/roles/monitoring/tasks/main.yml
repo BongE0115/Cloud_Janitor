@@ -39,7 +39,7 @@
     url: "http://localhost:3000/api/datasources"
     method: POST
     user: admin
-    password: "{{ monitoring_grafana_admin_password.stdout }}"
+    password: "{{ monitoring_grafana_admin_password }}"
     force_basic_auth: true
     body_format: json
     body:
@@ -57,5 +57,5 @@
       - "---------------------------------------------------"
       - "Grafana URL: http://localhost:3000"
       - "ID: admin"
-      - "PW: {{ monitoring_grafana_admin_password.stdout }}"
+      - "PW: {{ monitoring_grafana_admin_password }}"
       - "---------------------------------------------------"
