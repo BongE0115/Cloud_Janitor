@@ -1,11 +1,11 @@
-# 1. [설치] Helm으로 설치 
+# Helm으로 설치
 - name: Install Prometheus Stack using Helm
   ansible.builtin.command:
     cmd: >
-      helm upgrade --install kube-prometheus-stack 
-      prometheus-community/kube-prometheus-stack 
-      --namespace monitoring 
-      --create-namespace 
+      helm upgrade --install kube-prometheus-stack
+      prometheus-community/kube-prometheus-stack
+      --namespace monitoring
+      --create-namespace
       --values {{ playbook_dir }}/../roles/monitoring/values.yml
       --timeout 15m
       --wait
@@ -35,7 +35,7 @@
     url: "http://localhost:3000/api/datasources"
     method: POST
     user: admin
-    password: "{{ grafana_secret_output.stdout }}"  
+    password: "{{ grafana_secret_output.stdout }}"
     force_basic_auth: yes
     body_format: json
     body:
@@ -49,7 +49,7 @@
 # 5. [출력] 사용자에게 비밀번호 알려주기 📢
 - name: "🎉 설치 완료! 아래 정보로 로그인하세요"
   ansible.builtin.debug:
-    msg: 
+    msg:
       - "---------------------------------------------------"
       - "🚀 Grafana URL: http://localhost:3000"
       - "👤 ID: admin"
