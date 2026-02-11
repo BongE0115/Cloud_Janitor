@@ -42,7 +42,7 @@ def main():
 
         # --- [인프라 제어] ---
         "PROMETHEUS_URL": os.getenv('PROMETHEUS_URL', 'http://localhost:9999'), # 프로메테우스 접속 API 주소
-        "DRY_RUN": os.getenv('DRY_RUN', 'False').lower() == 'true',   # True일 경우 실제 삭제 없이 목록만 확인
+        "DRY_RUN": os.getenv('DRY_RUN', 'False').lower() == 'True',   # True일 경우 실제 삭제 없이 목록만 확인
         "WHITE_LIST_NS": ['kube-system', 'prometheus', 'local-path-storage', 'monitoring'], # 삭제 방지 보호 네임스페이스
         "TARGET_NAMESPACES": ['default', 'zombie-zone']              # 좀비를 탐색할 대상 네임스페이스
     }
