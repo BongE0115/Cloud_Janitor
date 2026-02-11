@@ -58,6 +58,13 @@ resource "helm_release" "loki_stack" {
   chart      = "loki-stack"
   namespace  = kubernetes_namespace.monitoring.metadata[0].name
 
+  version    = "2.9.11"
+
+  set {
+    name  = "loki.image.tag"
+    value = "2.9.10"
+  }
+
   wait            = true
   cleanup_on_fail = true
 
