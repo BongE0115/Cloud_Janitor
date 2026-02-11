@@ -1,8 +1,8 @@
 {
   "id": null,
-  "uid": "cloud-janitor-loki",
-  "title": "Cloud Janitor — Loki Logs",
-  "refresh": "10s",
+  "uid": "cloud-janitor-dashboard",
+  "title": "Cloud Janitor - logs dashboard",
+  "refresh": "5s",
   "schemaVersion": 39,
   "templating": {
     "list": [
@@ -10,53 +10,95 @@
         "name": "namespace",
         "type": "query",
         "label": "Namespace",
-        "datasource": { "type": "loki", "uid": "-- Grafana --" },
-        "definition": "label_values({job=~\".+\"}, namespace)",
-        "query": "label_values({job=~\".+\"}, namespace)",
+        "datasource": { "type": "loki", "uid": "Loki" },
+        "definition": "label_values(namespace)",
+        "query": "label_values(namespace)",
         "refresh": 2,
         "includeAll": true,
-        "allValue": ".+",
-        "multi": false,
-        "current": { "selected": true, "text": "All", "value": "$__all" }
-      },
-      {
-        "name": "pod",
-        "type": "query",
-        "label": "Pod",
-        "datasource": { "type": "loki", "uid": "-- Grafana --" },
-        "definition": "label_values({namespace=~\"$namespace\"}, pod)",
-        "query": "label_values({namespace=~\"$namespace\"}, pod)",
-        "refresh": 2,
-        "includeAll": true,
-        "allValue": ".+",
-        "multi": false,
-        "current": { "selected": true, "text": "All", "value": "$__all" }
+        "current": { "text": "target-workloads", "value": "target-workloads" }
       }
     ]
   },
   "panels": [
     {
-      "type": "logs",
-      "title": "실시간 로그  [$namespace / $pod]",
-      "gridPos": { "h": 22, "w": 24, "x": 0, "y": 0 },
-      "datasource": { "type": "loki", "uid": "-- Grafana --" },
+      "type": "stat",
+      "title": "잡아낸 좀비 숫자",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "Loki" },
       "targets": [
         {
-          "expr": "{namespace=~\"$namespace\", pod=~\"$pod\"}",
+          "expr": "count(sum by (pod) (count_over_time({namespace=~\"$namespace\", pod=~\"zombie.*\"} [$__range])))",
           "refId": "A"
         }
       ],
-      "options": {
-        "showTime": true,
-        "showLabels": true,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "sortOrder": "Descending"
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" } }
       }
+    },
+    {
+      "type": "stat",
+      "title": "절약된 예상 비용 (Total Savings)",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "targets": [
+        {
+          "expr": "sum(count_over_time({namespace=~\"$namespace\", pod=~\"zombie.*\"} [$__range])) * 0.5",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decusd",
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "좀비 파드 후보 (현재 작동 중)",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", pod=~\"zombie.*\", phase=\"Running\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "red" } }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "네트워크 트래픽양 (Pod Network I/O)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (pod) (irate(container_network_receive_bytes_total{namespace=~\"$namespace\"}[5m]))",
+          "legendFormat": "{{pod}} IN",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (pod) (irate(container_network_transmit_bytes_total{namespace=~\"$namespace\"}[5m]))",
+          "legendFormat": "{{pod}} OUT",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "binbps" } }
+    },
+    {
+      "type": "logs",
+      "title": "Janitor 활동 로",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 14 },
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "targets": [
+        {
+          "expr": "{namespace=~\"$namespace\"} |~ \"zombie|deleted|cleanup\"",
+          "refId": "A"
+        }
+      ],
+      "options": { "showTime": true, "enableLogDetails": true }
     }
-  ],
-  "time": { "from": "now-1h", "to": "now" },
-  "timezone": "browser"
+  ]
 }
