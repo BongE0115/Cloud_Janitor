@@ -89,6 +89,8 @@
       isDefault: false
       jsonData:
         maxLines: 1000
+        lokiVersion: "2.9.10"
+        httpMethod: "POST"
     status_code: [200]
   when: _loki_existing.status == 404
 
@@ -108,6 +110,8 @@
       isDefault: false
       jsonData:
         maxLines: 1000
+        lokiVersion: "2.9.10"
+        httpMethod: "POST"
     status_code: [200, 403]
   when: _loki_existing.status == 200
 
