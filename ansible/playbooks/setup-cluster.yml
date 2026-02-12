@@ -18,6 +18,10 @@
     env_file: "{{ playbook_dir }}/../../.env"
 
   pre_tasks:
+    - name: Ensure kubernetes python library is installed (uv)
+      ansible.builtin.command: uv pip install kubernetes
+      changed_when: false
+
     - name: Load .env file
       ansible.builtin.set_fact:
         env_vars: "{{ dict(lookup('file', env_file).split('\n')

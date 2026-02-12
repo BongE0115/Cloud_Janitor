@@ -1,0 +1,85 @@
+# =============================================================================
+# Prometheus Configuration for Target Cluster
+# Management Cluster의 Cloud Janitor가 이 Prometheus에 PromQL 쿼리를 전송
+# =============================================================================
+
+global:
+  # Metrics 수집 주기
+  scrape_interval: 15s
+  # 규칙 평가 주기
+  evaluation_interval: 15s
+  # 외부 라벨 (Management Cluster에서 식별용)
+    external_labels:
+    cluster: 'tc'
+    environment: 'production'
+
+# Alertmanager 설정 (현재는 미사용)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# 규칙 파일 경로 (현재는 미사용)
+rule_files:
+  # - "alerts.yml"
+
+# =============================================================================
+# Scrape Configurations - 메트릭 수집 대상 정의
+# =============================================================================
+
+scrape_configs:
+  # -----------------------------------------------------------------------------
+  # Prometheus 자체 메트릭
+  # -----------------------------------------------------------------------------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          component: 'self-monitoring'
+
+  # -----------------------------------------------------------------------------
+  # cAdvisor - Docker 컨테이너 메트릭 수집
+  # Cloud Janitor가 주로 사용할 메트릭 소스
+  # 주요 메트릭:
+  #   - container_cpu_usage_seconds_total: 컨테이너 CPU 사용량
+  #   - container_memory_usage_bytes: 컨테이너 메모리 사용량
+  #   - container_network_receive_bytes_total: 네트워크 수신량
+  #   - container_network_transmit_bytes_total: 네트워크 송신량
+  # -----------------------------------------------------------------------------
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          component: 'docker-containers'
+    # Cloud Janitor에서 필요한 메트릭만 선택적으로 수집 (필터링 미적용)
+    # 실제로는 모든 컨테이너 메트릭 수집 후 PromQL로 필터링
+
+  # -----------------------------------------------------------------------------
+  # Node Exporter (선택사항 - 노드 레벨 메트릭)
+  # 현재 docker-compose 환경에서는 미사용
+  # - job_name: 'node-exporter'
+  #   static_configs:
+  #     - targets: ['node-exporter:9100']
+  #       labels:
+  #         component: 'host-metrics'
+
+# =============================================================================
+# 예시 PromQL 쿼리 (Cloud Janitor에서 사용)
+# =============================================================================
+#
+# 1. CPU 사용량이 낮은 컨테이너 감지 (2분 평균 10m 미만):
+#    rate(container_cpu_usage_seconds_total{name!=""}[2m]) < 0.01
+#
+# 2. 네트워크 수신량이 낮은 컨테이너 감지 (2분 평균 100바이트 미만):
+#    rate(container_network_receive_bytes_total{name!=""}[2m]) < 100
+#
+# 3. 메모리 사용량이 낮은 컨테이너 감지:
+#    container_memory_usage_bytes{name!=""} < 1048576  # 1MB 미만
+#
+# 4. 좀비 컨테이너 전체 목록 (labeled by managed-by):
+#    container_last_seen{name="", label_managed_by="cloud-janitor"}
+#
+# 5. 특정 타입의 좀비 컨테이너만 감지:
+#    rate(container_cpu_usage_seconds_total{label_zombie_type="idle"}[2m]) < 0.01
+#
+# =============================================================================

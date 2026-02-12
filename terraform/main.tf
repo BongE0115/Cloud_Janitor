@@ -50,15 +50,11 @@ resource "kind_cluster" "default" {
     node {
       role = "control-plane"
 
-      # Grafana (3000), Prometheus (9090), MySQL (3306) 포트 노출
+      # Grafana (3000), MySQL (3306) 포트 노출
+      # Prometheus는 Target Cluster에서 별도로 실행되므로 포트 매핑 제거
       extra_port_mappings {
         container_port = 30080 # Grafana NodePort
         host_port      = 3000  # localhost:3000
-      }
-
-      extra_port_mappings {
-        container_port = 30090 # Prometheus NodePort
-        host_port      = 9090  # localhost:9090
       }
 
       extra_port_mappings {

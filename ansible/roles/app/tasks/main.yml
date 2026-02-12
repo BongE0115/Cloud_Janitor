@@ -1,4 +1,433 @@
 ---
-- name: Deploy Cloud Janitor App
-  debug:
-    msg: "Application deployment logic will be added here after building the Python app"
+# =============================================================================
+# Cloud Janitor Application Deployment
+# Management Cluster에 Cloud Janitor 앱 배포
+# Target Prometheus API를 호출하여 좀비 컨테이너 감지 및 삭제
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Namespace 확인
+# -----------------------------------------------------------------------------
+- name: Ensure default namespace exists
+  kubernetes.core.k8s:
+    name: default
+    kind: Namespace
+    state: present
+    api_version: v1
+
+# -----------------------------------------------------------------------------
+# 2. MySQL Database 테이블 초기화
+# MySQL은 Terraform에서 배포됨 (mysql 네임스페이스)
+# -----------------------------------------------------------------------------
+- name: Wait for MySQL to be ready
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: mysql
+    label_selectors:
+      - app = mysql
+  register: mysql_pod
+  until: mysql_pod.resources[0].status.phase == "Running"
+  retries: 30
+  delay: 5
+
+- name: Create deletion logs table in MySQL
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: Job
+      metadata:
+        name: mysql-init-{{ lookup('pipe', 'date +%s') }}
+        namespace: mysql
+      spec:
+        template:
+          spec:
+            restartPolicy: OnFailure
+            containers:
+              - name: mysql-init
+                image: mysql:8.0
+                env:
+                  - name: MYSQL_HOST
+                    value: "mysql.mysql.svc.cluster.local"
+                  - name: MYSQL_ROOT_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: mysql-secret
+                        key: mysql-root-password
+                  - name: MYSQL_DATABASE
+                    value: "janitor_db"
+                command:
+                  - bash
+                  - -c
+                  - |
+                    # Wait for MySQL to be ready
+                    until mysql -h$MYSQL_HOST -uroot -p$MYSQL_ROOT_PASSWORD -e "SELECT 1" >/dev/null 2>&1; do
+                      echo "Waiting for MySQL..."
+                      sleep 3
+                    done
+
+                    # Create deletion logs table
+                    mysql -h$MYSQL_HOST -uroot -p$MYSQL_ROOT_PASSWORD $MYSQL_DATABASE <<'EOF'
+                    CREATE TABLE IF NOT EXISTS deletion_logs (
+                      id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                      pod_name VARCHAR(255) NOT NULL,
+                      container_name VARCHAR(255),
+                      namespace VARCHAR(100),
+                      pod_ip VARCHAR(50),
+                      cpu_usage DECIMAL(10, 4),
+                      memory_usage DECIMAL(20, 2),
+                      network_receive_rate DECIMAL(20, 2),
+                      network_transmit_rate DECIMAL(20, 2),
+                      deletion_reason TEXT,
+                      detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                      INDEX idx_pod_name (pod_name),
+                      INDEX idx_deleted_at (deleted_at),
+                      INDEX idx_namespace (namespace)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+                    EOF
+
+                    echo "MySQL initialization completed successfully"
+  run_once: true
+
+# -----------------------------------------------------------------------------
+# 3. Cloud Janitor ConfigMap 생성
+# -----------------------------------------------------------------------------
+- name: Create Cloud Janitor ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cloud-janitor-config
+        namespace: default
+      data:
+        config.yaml: |
+          # Cloud Janitor Configuration
+          # Management Cluster(cj)에서 Target Cluster(TC) 메트릭 수집
+          
+          # Prometheus Connection (Target Cluster)
+          # cj가 TC의 Prometheus API를 직접 폴링
+          prometheus:
+            url: "http://{{ TARGET_PROMETHEUS_URL | default('localhost:9091') }}"
+            timeout: 30
+          
+          # Zombie Detection Criteria
+          detection:
+            cpu:
+              limit_millicores: "{{ LIMIT_CPU_M | default('10.0') }}"
+              time_window: "{{ TIME_WINDOW_CPU | default('2m') }}"
+            network:
+              limit_bytes: "{{ LIMIT_NET_B | default('100.0') }}"
+              time_window: "{{ TIME_WINDOW_NET | default('2m') }}"
+            memory:
+              limit_mb: "{{ LIMIT_MEM_MI | default('1.0') }}"
+          
+          # Deletion Control
+          deletion:
+            dry_run: "{{ DRY_RUN | default('True') }}"
+            cost_per_core_hour: "{{ COST_PER_CORE_HOUR | default('0.1') }}"
+            default_cpu_request: "{{ DEFAULT_CPU_REQ | default('0.2') }}"
+          
+          # Target Cluster Configuration (Docker API)
+          # cj가 TC의 Docker API에 직접 접근하여 좀비 컨테이너 삭제
+          target_cluster:
+            type: "docker"
+            host: "unix:///var/run/docker.sock"
+            # For remote Docker daemon:
+            # host: "tcp://target-host:2375"
+          
+          # Logging
+          logging:
+            level: "INFO"
+            file: "/var/log/cloud-janitor/janitor.log"
+
+# -----------------------------------------------------------------------------
+# 4. Cloud Janitor Secret 생성 (MySQL 비밀번호)
+# -----------------------------------------------------------------------------
+- name: Create Cloud Janitor Secret
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cloud-janitor-secret
+        namespace: default
+      type: Opaque
+      stringData:
+        db-host: "{{ env_vars['DB_HOST'] | default('mysql.mysql.svc.cluster.local') }}"
+        db-user: "{{ env_vars['DB_USER'] | default('root') }}"
+        db-password: "{{ env_vars['DB_PASSWORD'] | default('rootpassword') }}"
+        db-name: "{{ env_vars['DB_NAME'] | default('janitor_db') }}"
+
+# -----------------------------------------------------------------------------
+# 5. Cloud Janitor RBAC (권한 설정)
+# -----------------------------------------------------------------------------
+- name: Create Cloud Janitor ServiceAccount
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: cloud-janitor
+        namespace: default
+
+- name: Create Cloud Janitor ClusterRole
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRole
+      metadata:
+        name: cloud-janitor
+      rules:
+        - apiGroups: [""]
+          resources: ["pods", "namespaces"]
+          verbs: ["get", "list", "watch", "delete"]
+
+- name: Create Cloud Janitor ClusterRoleBinding
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: cloud-janitor
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: cloud-janitor
+      subjects:
+        - kind: ServiceAccount
+          name: cloud-janitor
+          namespace: default
+
+# -----------------------------------------------------------------------------
+# 6. Cloud Janitor Deployment (Cloud Janitor 앱 배포)
+# -----------------------------------------------------------------------------
+- name: Deploy Cloud Janitor
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: cloud-janitor
+        namespace: default
+        labels:
+          app: cloud-janitor
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: cloud-janitor
+        template:
+          metadata:
+            labels:
+              app: cloud-janitor
+          spec:
+            serviceAccountName: cloud-janitor
+            
+            # Docker Socket Mount (Target Docker API 접근용)
+            volumes:
+              - name: docker-socket
+                hostPath:
+                  path: /var/run/docker.sock
+                  type: Socket
+              - name: log-dir
+                emptyDir: {}
+            
+            containers:
+              - name: cloud-janitor
+                image: cloud-janitor:latest  # TODO: 빌드한 이미지로 변경
+                imagePullPolicy: IfNotPresent
+                
+                env:
+                  # Target Prometheus URL
+                  - name: TARGET_PROMETHEUS_URL
+                    valueFrom:
+                      configMapKeyRef:
+                        name: cloud-janitor-config
+                        key: config.yaml
+                  # OR:
+                  - name: PROMETHEUS_URL
+                    value: "{{ env_vars['TARGET_PROMETHEUS_URL'] | default('http://localhost:9091') }}"
+                  
+                  # Database Configuration
+                  - name: DB_HOST
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-host
+                  - name: DB_USER
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-user
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-password
+                  - name: DB_NAME
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-name
+                  
+                  # Detection Criteria
+                  - name: LIMIT_CPU_M
+                    value: "{{ env_vars['LIMIT_CPU_M'] | default('10.0') }}"
+                  - name: TIME_WINDOW_CPU
+                    value: "{{ env_vars['TIME_WINDOW_CPU'] | default('2m') }}"
+                  - name: LIMIT_NET_B
+                    value: "{{ env_vars['LIMIT_NET_B'] | default('100.0') }}"
+                  - name: TIME_WINDOW_NET
+                    value: "{{ env_vars['TIME_WINDOW_NET'] | default('2m') }}"
+                  
+                  # Deletion Control
+                  - name: DRY_RUN
+                    value: "{{ env_vars['DRY_RUN'] | default('True') }}"
+                  - name: COST_PER_CORE_HOUR
+                    value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
+                  - name: DEFAULT_CPU_REQ
+                    value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                
+                ports:
+                  - name: http
+                    containerPort: 8000
+                    protocol: TCP
+                
+                volumeMounts:
+                  - name: log-dir
+                    mountPath: /var/log/cloud-janitor
+                
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "128Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "512Mi"
+                
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8000
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                
+                readinessProbe:
+                  httpGet:
+                    path: /ready
+                    port: 8000
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+
+# -----------------------------------------------------------------------------
+# 7. Cloud Janitor Service
+# -----------------------------------------------------------------------------
+- name: Create Cloud Janitor Service
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: cloud-janitor
+        namespace: default
+        labels:
+          app: cloud-janitor
+      spec:
+        type: NodePort
+        ports:
+          - name: http
+            port: 8000
+            targetPort: 8000
+            nodePort: 30800
+            protocol: TCP
+        selector:
+          app: cloud-janitor
+
+# -----------------------------------------------------------------------------
+# 8. Cloud Janitor CronJob (정기적 좀비 파드 감지 및 삭제)
+# -----------------------------------------------------------------------------
+- name: Create Cloud Janitor CronJob
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: cloud-janitor-scanner
+        namespace: default
+      spec:
+        schedule: "*/5 * * * *"  # 매 5분마다 실행
+        jobTemplate:
+          spec:
+            backoffLimit: 3
+            activeDeadlineSeconds: 300
+            template:
+              spec:
+                serviceAccountName: cloud-janitor
+                restartPolicy: OnFailure
+                containers:
+                  - name: scanner
+                    image: cloud-janitor:latest
+                    imagePullPolicy: IfNotPresent
+                    
+                    env:
+                      # Copy same environment variables from deployment
+                      - name: PROMETHEUS_URL
+                        value: "{{ env_vars['TARGET_PROMETHEUS_URL'] | default('http://localhost:9091') }}"
+                      - name: DB_HOST
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-host
+                      - name: DB_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-user
+                      - name: DB_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-password
+                      - name: DB_NAME
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-name
+                      - name: LIMIT_CPU_M
+                        value: "{{ env_vars['LIMIT_CPU_M'] | default('10.0') }}"
+                      - name: TIME_WINDOW_CPU
+                        value: "{{ env_vars['TIME_WINDOW_CPU'] | default('2m') }}"
+                      - name: LIMIT_NET_B
+                        value: "{{ env_vars['LIMIT_NET_B'] | default('100.0') }}"
+                      - name: TIME_WINDOW_NET
+                        value: "{{ env_vars['TIME_WINDOW_NET'] | default('2m') }}"
+                      - name: DRY_RUN
+                        value: "{{ env_vars['DRY_RUN'] | default('True') }}"
+                      - name: COST_PER_CORE_HOUR
+                        value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
+                      - name: DEFAULT_CPU_REQ
+                        value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                    
+                    command:
+                      - python
+                      - -m
+                      - cloud_janitor
+                      - scan
+                    
+                    resources:
+                      requests:
+                        cpu: "100m"
+                        memory: "128Mi"
+                      limits:
+                        cpu: "500m"
+                        memory: "512Mi"

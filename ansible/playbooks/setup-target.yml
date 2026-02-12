@@ -1,0 +1,64 @@
+---
+# =============================================================================
+# Target Cluster Setup Playbook
+# Management Cluster에서 Target Cluster를 관리할 수 있도록 설정
+# - Target Prometheus 접속 가능한지 확인
+# - Cloud Janitor에서 Target Docker API에 접근할 수 있도록 설정
+# - Promtail 설치 (Target Cluster 로그를 Management Loki로 전송)
+# =============================================================================
+
+- name: Setup Target Cluster Integration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../../terraform/cloud-janitor-cluster-config"
+    env_file: "{{ playbook_dir }}/../../.env"
+    target_prometheus_url: "http://localhost:9091"
+
+  pre_tasks:
+    - name: Load .env file
+      ansible.builtin.set_fact:
+        env_vars: "{{ dict(lookup('file', env_file).split('\n')
+          | reject('match', '^ *#')
+          | reject('match', '^ *$')
+          | map('regex_replace', ' *#.*$', '')
+          | map('trim')
+          | select('search', '=')
+          | map('split', '=', 1)
+          | list) }}"
+
+    - name: Set Target Prometheus URL from .env
+      ansible.builtin.set_fact:
+        target_prometheus_url: "{{ env_vars['TARGET_PROMETHEUS_URL'] | default('http://localhost:9091') }}"
+
+    - name: Verify kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ kubeconfig }}"
+      register: kubeconfig_stat
+
+    - name: Fail if kubeconfig does not exist
+      ansible.builtin.fail:
+        msg: "kubeconfig 파일을 찾을 수 없습니다: {{ kubeconfig }}"
+      when: not kubeconfig_stat.stat.exists
+
+    - name: Verify Target Prometheus is accessible
+      ansible.builtin.uri:
+        url: "{{ target_prometheus_url }}"
+        method: GET
+        return_content: true
+      register: prometheus_check
+      until: prometheus_check.status == 200
+      retries: 10
+      delay: 5
+      ignore_errors: true
+
+    - name: Display Prometheus accessibility status
+      ansible.builtin.debug:
+        msg: "Target Prometheus ({{ target_prometheus_url }}) 접속 상태: {{ 'OK' if prometheus_check.status == 200 else 'FAIL' }}"
+
+  roles:
+    - role: target
+      vars:
+        target_prometheus_url: "{{ env_vars['TARGET_PROMETHEUS_URL'] | default('http://localhost:9091') }}"

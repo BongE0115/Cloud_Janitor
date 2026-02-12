@@ -1,0 +1,110 @@
+---
+# =============================================================================
+# Target Cluster Integration Tasks
+# Management Cluster와 Target Cluster 간의 연결 설정
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Target Prometheus 데이터소스를 Grafana에 추가
+# -----------------------------------------------------------------------------
+- name: Wait for Grafana to be ready
+  kubernetes.core.k8s_info:
+    kind: Pod
+    namespace: monitoring
+    label_selectors:
+      - app.kubernetes.io/name = grafana
+  register: grafana_pod
+  until: grafana_pod.resources[0].status.phase == "Running"
+  retries: 30
+  delay: 5
+
+- name: Create Grafana DataSource for Target Prometheus
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: grafana-datasources
+        namespace: monitoring
+        labels:
+          grafana_datasource: "true"
+      data:
+        prometheus-target.yaml: |
+          apiVersion: 1
+          datasources:
+            - name: Target-Prometheus
+              type: prometheus
+              access: proxy
+              url: "{{ target_prometheus_url }}"
+              isDefault: false
+              editable: true
+              jsonData:
+                timeInterval: 15s
+                queryTimeout: 30s
+                httpMethod: POST
+
+# -----------------------------------------------------------------------------
+# 2. Promtail 설정 (Target Cluster 로그를 Management Loki로 전송)
+# NOTE: 현재 Docker Compose 환경에서는 Promtail이 Docker 네트워크 외부에 있으므로
+#       Management Loki에 로그를 전송하려면 포트 포워딩이 필요함
+#       이 예제에서는 로그 수집을 건너뛰거나 별도로 구성해야 함
+# -----------------------------------------------------------------------------
+- name: Skip Promtail deployment (Docker Compose environment limitation)
+  ansible.builtin.debug:
+    msg: "Target Cluster는 Docker Compose 환경이므로 Promtail을 통해 Management Loki로 로그 전송을 건너뜁니다. 로그 수집이 필요한 경우 Docker 네트워크 구성을 변경하세요."
+
+# -----------------------------------------------------------------------------
+# 3. Cloud Janitor가 Target Docker API에 접근할 수 있도록 설정
+# NOTE: Management Cluster가 로컬 Docker 데몬에 접근할 수 있도록 설정 필요
+#       현재는 Management Cluster가 Kind 클러스터 내부에 있으므로
+#       hostPath 마운트를 통해서만 접근 가능
+# -----------------------------------------------------------------------------
+- name: Verify Docker socket access configuration
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    namespace: default
+    name: cloud-janitor
+  register: cloud_janitor_deployment
+  ignore_errors: true
+
+- name: Display Docker socket access status
+  ansible.builtin.debug:
+    msg: "Cloud Janitor Deployment 상태: {{ 'OK' if cloud_janitor_deployment.resources | length > 0 else 'NOT FOUND' }}"
+
+# -----------------------------------------------------------------------------
+# 4. 테스트: Target Prometheus에 PromQL 쿼리 전송
+# -----------------------------------------------------------------------------
+- name: Test Target Prometheus connectivity with PromQL query
+  ansible.builtin.uri:
+    url: "{{ target_prometheus_url }}/api/v1/query"
+    method: POST
+    body_format: json
+    body:
+      query: "up"
+    return_content: true
+  register: prometheus_query
+  until: prometheus_query.status == 200
+  retries: 5
+  delay: 3
+  ignore_errors: true
+
+- name: Display PromQL query result
+  ansible.builtin.debug:
+    var: prometheus_query.json.data.result
+  when: prometheus_query.status == 200
+
+# -----------------------------------------------------------------------------
+# 5. Cloud Janitor 설정 확인
+# -----------------------------------------------------------------------------
+- name: Verify Cloud Janitor Configuration
+  kubernetes.core.k8s_info:
+    kind: ConfigMap
+    namespace: default
+    name: cloud-janitor-config
+  register: janitor_config
+  ignore_errors: true
+
+- name: Display Cloud Janitor Configuration status
+  ansible.builtin.debug:
+    msg: "Cloud Janitor ConfigMap 상태: {{ 'OK' if janitor_config.resources | length > 0 else 'NOT FOUND' }}"

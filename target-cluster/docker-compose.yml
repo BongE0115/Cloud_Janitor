@@ -1,0 +1,230 @@
+# =============================================================================
+# Target Cluster Docker Compose
+# 별개 환경에서 독립적으로 실행되는 테스트 클러스터
+# - Prometheus: 메트릭 수집 및 PromQL 쿼리 제공
+# - Dummy Apps: Cloud Janitor가 모니터링 및 제어할 대상 컨테이너들
+# =============================================================================
+
+services:
+  # -----------------------------------------------------------------------------
+  # Prometheus - Target Cluster 메트릭 수집
+  # - Management Cluster의 Cloud Janitor가 PromQL 쿼리를 전송
+  # -----------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: target-prometheus
+    restart: unless-stopped
+    ports:
+      - "9091:9090"  # localhost:9091로 접근 (Management와 충돌 방지)
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - target-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # -----------------------------------------------------------------------------
+  # Dummy Application 1: Active Web Server (정상 동작 앱)
+  # - CPU/네트워크 사용량이 높아 좀비로 판정되지 않음
+  # -----------------------------------------------------------------------------
+  app-active:
+    image: nginx:alpine
+    container_name: app-active
+    restart: unless-stopped
+    ports:
+      - "8081:80"
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+      managed-by: "cloud-janitor"
+    # CPU 부하 생성 (정상 동작 시뮬레이션)
+    command: >
+      sh -c "
+      echo 'Starting active web server...' &&
+      nginx -g 'daemon off;' &
+      while true; do
+        # CPU 부하 생성
+        for i in $$(seq 1 100); do
+          echo $$i > /dev/null
+        done
+        # 네트워크 트래픽 생성
+        curl -s http://localhost/ > /dev/null 2>&1 || true
+        sleep 1
+      done
+      "
+
+  # -----------------------------------------------------------------------------
+  # Dummy Application 2: Zombie Pod (CPU/Network 미사용)
+  # - CPU 사용량이 낮고 네트워크 트래픽이 없어 좀비로 판정됨
+  # -----------------------------------------------------------------------------
+  app-zombie-sleeper:
+    image: busybox:latest
+    container_name: app-zombie-sleeper
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      managed-by: "cloud-janitor"
+      zombie-type: "idle"
+    # CPU/네트워크 사용량 거의 없음
+    command: ["sleep", "infinity"]
+    deploy:
+      resources:
+        limits:
+          cpus: '0.05'
+          memory: 64M
+        reservations:
+          cpus: '0.01'
+          memory: 16M
+
+  # -----------------------------------------------------------------------------
+  # Dummy Application 3: Another Zombie Pod (완료된 작업)
+  # -----------------------------------------------------------------------------
+  app-zombie-completed:
+    image: alpine:latest
+    container_name: app-zombie-completed
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      managed-by: "cloud-janitor"
+      zombie-type: "completed"
+    # 작업 완료 후 대기 상태
+    command: >
+      sh -c "
+      echo 'Task completed. Waiting for cleanup...' &&
+      sleep infinity
+      "
+    deploy:
+      resources:
+        limits:
+          cpus: '0.02'
+          memory: 32M
+        reservations:
+          cpus: '0.005'
+          memory: 8M
+
+  # -----------------------------------------------------------------------------
+  # Dummy Application 4: Forgotten Test Pod (테스트 환경)
+  # -----------------------------------------------------------------------------
+  app-zombie-test:
+    image: nginx:alpine
+    container_name: app-zombie-test
+    restart: unless-stopped
+    ports:
+      - "8082:80"
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      managed-by: "cloud-janitor"
+      zombie-type: "forgotten"
+      environment: "test"
+    # 테스트 완료 후 대기
+    command: >
+      sh -c "
+      echo 'Test environment finished. Nobody cleaned me up.' &&
+      nginx -g 'daemon off;' &
+      sleep infinity
+      "
+    deploy:
+      resources:
+        limits:
+          cpus: '0.02'
+          memory: 64M
+        reservations:
+          cpus: '0.01'
+          memory: 16M
+
+  # -----------------------------------------------------------------------------
+  # Dummy Application 5: Old Development Pod (스테일 환경)
+  # -----------------------------------------------------------------------------
+  app-zombie-dev:
+    image: redis:alpine
+    container_name: app-zombie-dev
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      managed-by: "cloud-janitor"
+      zombie-type: "stale"
+      environment: "dev"
+    # Dev 환경에서 사용하지 않는 채로 방치됨
+    deploy:
+      resources:
+        limits:
+          cpus: '0.02'
+          memory: 64M
+        reservations:
+          cpus: '0.005'
+          memory: 16M
+
+  # -----------------------------------------------------------------------------
+  # cAdvisor - Container Metrics Exporter
+  # - Docker 컨테이너 메트릭을 Prometheus에 노출
+  # -----------------------------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - target-network
+    devices:
+      - /dev/kmsg
+    labels:
+      app: "cadvisor"
+      managed-by: "cloud-janitor"
+
+  promtail:
+    image: grafana/promtail:2.9.10
+    container_name: promtail
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/promtail/promtail-config.yaml
+      - -config.expand-env=true
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-data:/var/lib/promtail
+    environment:
+      - LOKI_URL=${LOKI_URL:-http://host.docker.internal:3100}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - target-network
+
+volumes:
+  prometheus-data:
+    driver: local
+  promtail-data:
+    driver: local
+
+networks:
+  target-network:
+    driver: bridge
+    name: tc-network
+    external: true
