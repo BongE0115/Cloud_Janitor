@@ -1,0 +1,142 @@
+---
+# =============================================================================
+# Grafana 설정 — Datasource 등록 + 대시보드 Import
+# Terraform이 인프라(Helm)를 설치한 뒤, Ansible이 설정을 주입합니다.
+# =============================================================================
+
+# 1) Grafana Health 대기
+- name: Wait for Grafana to be ready
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/health"
+    method: GET
+    status_code: 200
+  register: _grafana_health
+  until: _grafana_health.status == 200
+  retries: 30
+  delay: 10
+
+# ── Datasource: Prometheus ──────────────────────────────────────────────────
+
+- name: Get existing Prometheus datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/name/Prometheus"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: _prom_existing
+
+- name: Create Prometheus datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: Prometheus
+      type: prometheus
+      url: "{{ prometheus_internal_url }}"
+      access: proxy
+      isDefault: true
+    status_code: [200]
+  when: _prom_existing.status == 404
+
+- name: Update Prometheus datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/{{ _prom_existing.json.id }}"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: Prometheus
+      type: prometheus
+      url: "{{ prometheus_internal_url }}"
+      access: proxy
+      isDefault: true
+    status_code: [200, 403]
+  when: _prom_existing.status == 200
+
+# ── Datasource: Loki ────────────────────────────────────────────────────────
+
+- name: Get existing Loki datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/name/Loki"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: _loki_existing
+
+- name: Create Loki datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: Loki
+      type: loki
+      url: "{{ loki_internal_url }}"
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxLines: 1000
+        lokiVersion: "2.9.10"
+        httpMethod: "POST"
+    status_code: [200]
+  when: _loki_existing.status == 404
+
+- name: Update Loki datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/{{ _loki_existing.json.id }}"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: Loki
+      type: loki
+      url: "{{ loki_internal_url }}"
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxLines: 1000
+        lokiVersion: "2.9.10"
+        httpMethod: "POST"
+    status_code: [200, 403]
+  when: _loki_existing.status == 200
+
+# ── Dashboard Import ────────────────────────────────────────────────────────
+
+- name: Import Cloud Janitor Loki dashboard
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/dashboards/db"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      dashboard: "{{ lookup('file', role_path + '/files/loki-dashboard.json') | from_json }}"
+      overwrite: true
+    status_code: [200]
+
+# ── 결과 출력 ───────────────────────────────────────────────────────────────
+
+- name: Show Grafana login info
+  ansible.builtin.debug:
+    msg:
+      - "---------------------------------------------------"
+      - "Grafana  : {{ grafana_url }}"
+      - "ID       : {{ grafana_admin_user }}"
+      - "PW       : {{ grafana_admin_password }}"
+      - "---------------------------------------------------"

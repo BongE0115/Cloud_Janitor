@@ -1,0 +1,22 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cloud-janitor
+  namespace: default
+spec:
+  schedule: "*/2 * * * *" # 2분마다 실행
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: janitor-sa
+          containers:
+          - name: janitor
+            image: janitor:v1
+            imagePullPolicy: Never # 로컬 이미지를 쓰므로 Never 필수!
+            envFrom:
+            - configMapRef:
+                name: janitor-config
+            - secretRef:
+                name: janitor-secret
+          restartPolicy: OnFailure

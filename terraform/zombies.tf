@@ -195,15 +195,4 @@ resource "kubernetes_pod" "zombie_old_dev" {
   depends_on = [kubernetes_namespace.target_workloads]
 }
 
-# -----------------------------------------------------------------------------
-# Output: Zombie namespace info
-# -----------------------------------------------------------------------------
-output "zombie_namespace" {
-  description = "Target workloads namespace for zombie pods"
-  value       = kubernetes_namespace.target_workloads.metadata[0].name
-}
-
-output "zombie_pods_count" {
-  description = "Total number of zombie pods created"
-  value       = "7 pods (3 sleeper + 2 completed + 1 forgotten + 1 old-dev)"
-}
+# (outputs moved to outputs.tf)

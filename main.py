@@ -2,8 +2,10 @@ import os
 import sys
 from dotenv import load_dotenv  # .env 파일에 정의된 환경 변수를 로드하기 위한 라이브러리
 
+
 # 프로젝트의 로직 폴더(py_Logic)를 파이썬 경로에 등록하여 임포트 가능하게 함
 sys.path.append(os.path.join(os.path.dirname(__file__), 'py_Logic'))
+
 
 # .env 파일의 내용을 환경 변수로 불러옴 (파일이 없어도 에러 없이 통과됨)
 load_dotenv()
@@ -54,3 +56,4 @@ def main():
 if __name__ == "__main__":
     # 프로그램 실행 시 가장 먼저 main 함수 호출
     main()
+
