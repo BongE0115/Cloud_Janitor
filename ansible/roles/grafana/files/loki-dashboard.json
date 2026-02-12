@@ -27,7 +27,7 @@
       "datasource": { "type": "loki", "uid": "Loki" },
       "targets": [
         {
-          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", pod=~\"zombie.*\")",
+          "expr": "count(count_over_time({namespace=~\"$namespace\", pod=~\"zombie.*\"} [$__range]))",
           "refId": "A"
         }
       ],
