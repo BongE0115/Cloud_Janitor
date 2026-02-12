@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: List
+items:
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-1-cpu-heavy
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/1_cpu_heavy.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-1-shiny-tree
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/1_shiny_tree_cpu.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-1-memory-bus
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/1_memory_bus.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-1-use-memory
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/1_use_memory.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-1-net-connect
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      # requests 라이브러리 설치 후 스크립트 실행
+      command: ["/bin/sh", "-c", "pip install requests && python /scripts/1_nginx_connect_net.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-3-scarecrow
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/2_scarecrow.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-2-worklife
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/2_WorkLifeBalance_cpu.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-2-net-connect
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      # requests 라이브러리 설치 후 스크립트 실행
+      command: ["/bin/sh", "-c", "pip install requests && python /scripts/2_nginx_connect_net.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-3-zombi
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/3_zombi.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
+
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: pod-3-snowing
+    labels: {app: worker}
+  spec:
+    containers:
+    - name: worker
+      image: python:3.9-slim
+      command: ["python", "/scripts/3_snowing_cpu.py"]
+      volumeMounts: [{name: script-vol, mountPath: /scripts}]
+    volumes: [{name: script-vol, configMap: {name: pod-scripts}}]
