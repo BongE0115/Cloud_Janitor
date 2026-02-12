@@ -15,7 +15,7 @@
         "query": "label_values(namespace)",
         "refresh": 2,
         "includeAll": true,
-        "current": { "text": "target-workloads", "value": "target-workloads" }
+        "current": { "text": "default", "value": "default" }
       }
     ]
   },
@@ -27,7 +27,7 @@
       "datasource": { "type": "loki", "uid": "Loki" },
       "targets": [
         {
-          "expr": "count(sum by (pod) (count_over_time({namespace=~\"$namespace\", pod=~\"zombie.*\"} [$__range])))",
+          "expr": "count(count_over_time({namespace=~\"$namespace\", pod=~\"zombie.*\"} [$__range]))",
           "refId": "A"
         }
       ],
@@ -60,7 +60,7 @@
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
-          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", pod=~\"zombie.*\", phase=\"Running\"})",
+          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod=~\"candidate.*\"})",
           "refId": "A"
         }
       ],
@@ -70,8 +70,42 @@
     },
     {
       "type": "timeseries",
-      "title": "네트워크 트래픽양 (Pod Network I/O)",
+      "title": "관리 중인 Pod 개수 (Zombie / Candidate / Normal)",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod=~\"zombie.*\"})",
+          "legendFormat": "Zombie",
+          "refId": "A"
+        },
+        {
+          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod=~\"candidate.*\"})",
+          "legendFormat": "Candidate",
+          "refId": "B"
+        },
+        {
+          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod!~\"zombie.*|candidate.*\"})",
+          "legendFormat": "Normal",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 100,
+            "lineWidth": 1,
+            "gradientMode": "none",
+            "stacking": { "mode": "normal", "group": "A" }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "네트워크 트래픽양 (Pod Network I/O)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
@@ -89,8 +123,8 @@
     },
     {
       "type": "logs",
-      "title": "Janitor 활동 로",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 14 },
+      "title": "Janitor 활동 로그",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
       "datasource": { "type": "loki", "uid": "Loki" },
       "targets": [
         {
