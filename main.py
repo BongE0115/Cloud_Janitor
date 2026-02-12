@@ -35,14 +35,15 @@ def main():
         "DB_CONFIG": {
             "host": os.getenv('DB_HOST', '127.0.0.1'),             # 데이터베이스 서버 주소
             "user": os.getenv('DB_USER', 'root'),                  # 접속 계정 아이디
-            "password": os.getenv('DB_PASSWORD', '1234'),          # 접속 계정 비밀번호
-            "database": os.getenv('DB_NAME', 'janitor_db'),        # 사용할 데이터베이스 이름
+            "password": os.getenv('DB_PASSWORD', 'rootpassword'),          # 접속 계정 비밀번호
+            "database": os.getenv('DB_NAME', 'cloud_janitor'),        # 사용할 데이터베이스 이름
             "auth_plugin": "mysql_native_password"                 # MySQL 8.0 이상 호환을 위한 플러그인 설정
         },
 
         # --- [인프라 제어] ---
-        "PROMETHEUS_URL": os.getenv('PROMETHEUS_URL', 'http://localhost:9999'), # 프로메테우스 접속 API 주소
-        "DRY_RUN": os.getenv('DRY_RUN', 'False').lower() == 'True',   # True일 경우 실제 삭제 없이 목록만 확인
+        "PROMETHEUS_URL": os.getenv('PROMETHEUS_URL', 'http://localhost:9090'), # 프로메테우스 접속 API 주소
+        "DRY_RUN": False,
+        #"DRY_RUN": os.getenv('DRY_RUN', 'False').lower() == 'True',   # True일 경우 실제 삭제 없이 목록만 확인
         "WHITE_LIST_NS": ['kube-system', 'prometheus', 'local-path-storage', 'monitoring'], # 삭제 방지 보호 네임스페이스
         "TARGET_NAMESPACES": ['default', 'zombie-zone']              # 좀비를 탐색할 대상 네임스페이스
     }
