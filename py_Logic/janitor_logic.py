@@ -31,6 +31,9 @@ def run_janitor(config):
     for pod in all_pods:
         ns, name = pod.metadata.namespace, pod.metadata.name
         
+        if "mysql" in name:
+            print(f"🛡️ [SKIP] {name} 은 핵심 인프라(DB)이므로 건너뜁니다.")
+            continue
         # 프로메테우스 쿼리 준비
         cpu_q = f'sum(rate(container_cpu_usage_seconds_total{{pod="{name}",namespace="{ns}"}}[{config["TIME_WINDOW_CPU"]}])) * 1000'
         mem_q = f'sum(container_memory_working_set_bytes{{pod="{name}",namespace="{ns}"}}) / 1024 / 1024'
