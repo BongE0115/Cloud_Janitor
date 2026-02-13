@@ -409,7 +409,7 @@ cmd_init() {
     # 디렉토리 구조 확인
     log_info "프로젝트 디렉토리 구조 확인 중..."
     
-    for dir in terraform ansible scripts; do
+    for dir in terraform ansible; do
         if [ -d "$CJ_HOME/$dir" ]; then
             log_success "$dir/ ✓"
         else
@@ -473,7 +473,7 @@ cmd_init() {
     echo ""
     log_info "다음 명령어로 계속 진행하세요:"
     echo "   tc start              # Target 앱(좀비 포함) 시작"
-    echo "   tc prometheus start   # Target Prometheus 시작"
+    echo "   tc pm start           # Target Prometheus 시작"
     echo "   cj setup              # Management 설정"
     echo ""
     log_info "참고: Target Prometheus는 tc에서 별도 실행합니다."
@@ -672,7 +672,7 @@ cmd_setup() {
     if [ "$TARGET_PROMETHEUS_INSTALLED" != "true" ]; then
         log_warning "Target Prometheus가 아직 실행되지 않았습니다."
         log_info "다음 순서로 진행하세요:"
-        echo "   tc prometheus start"
+        echo "   tc pm start"
         echo "   cj ans configure"
     fi
 
@@ -999,14 +999,14 @@ cmd_ans() {
                 TARGET_PROMETHEUS_INSTALLED=false
                 save_state
                 log_warning "Target Prometheus 접속 실패"
-                log_info "먼저 실행하세요: tc prometheus start"
+                log_info "먼저 실행하세요: tc pm start"
             fi
             echo ""
             log_info "다음 명령어 추천:"
             if [ "$TARGET_PROMETHEUS_INSTALLED" = "true" ]; then
                 echo "   cj ans configure"
             else
-                echo "   tc prometheus start"
+                echo "   tc pm start"
             fi
             ;;
             
@@ -1026,10 +1026,10 @@ cmd_ans() {
                 log_success "Target Prometheus 접속 성공"
             else
                 log_warning "Target Prometheus 접속 실패"
-                log_info "먼저 실행하세요: tc prometheus start"
+                log_info "먼저 실행하세요: tc pm start"
                 echo ""
                 log_info "다음 명령어 추천:"
-                echo "   tc prometheus start"
+                echo "   tc pm start"
                 return 0
             fi
             

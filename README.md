@@ -106,27 +106,28 @@ TC에서 Prometheus와 앱을 실행하고, cj에서 설정/시작하여 연결�
 ### 실행 프로세스
 
 ```bash
-# 1) CLI 설치
+# 1. CLI 설치
 ./cj install
 ./tc install
 
-# 2) 초기화
+# 2. 초기화
 cj init
 
-# 3) TC 앱 시작
+# 3. TC 앱 시작
 tc start
 
-# 4) TC Prometheus + Promtail 시작
+# 4. TC Prometheus + Promtail 시작
 tc pm start
 
-# 5) cj 설정 및 시작
+# 5. cj 설정 및 시작
 cj setup
 cj start
 
-# 6) TC → cj 연결
+# 6. TC → cj 연결
 tc connect -a localhost
 ```
-Prometheus가 먼저 실행되어 있어야 `cj setup`이 정상 동작합니다.
+Prometheus가 먼저 실행되어 있어야 `cj setup`이 정상 동작합니다.  
+`Prometheus 헬스 체크 중...`에서 헬스 체크 실패 라고 뜨는건 정상적인 경우입니다.  
 
 ## 🛠️ cj CLI 명령어 가이드
 
@@ -338,5 +339,5 @@ docker ps -a --filter "label=app-type=zombie" | grep Exited
   curl http://192.168.1.100:9091/-/healthy
   
 # Target Prometheus 시작
-tc prometheus start
+tc pm start
   ```
