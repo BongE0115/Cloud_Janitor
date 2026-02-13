@@ -1,0 +1,27 @@
+CREATE TABLE zombie_lifecycle (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    
+    -- [Comment] 파드 식별 정보 (네임스페이스와 이름 조합은 유일해야 함)
+    pod_name VARCHAR(255) NOT NULL,
+    namespace VARCHAR(100) NOT NULL,
+
+    -- [Comment] 현재 상태 관리 (탐지 시 PENDING, 삭제 시 DELETED)
+    status ENUM('PENDING', 'DELETED', 'SAVED') DEFAULT 'PENDING',
+
+    -- [Comment] 시간 관련 기록
+    detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,      -- 최초 좀비 감지 시각
+    scheduled_delete_at TIMESTAMP NULL DEFAULT NULL,     -- 삭제 예정 시각 (유예 기간 적용)
+    deleted_at TIMESTAMP NULL DEFAULT NULL,               -- 실제 삭제 완료 시각
+    
+    -- [Comment] 알림 관련 (추후 확장용)
+    warning_sent_at TIMESTAMP NULL DEFAULT NULL,
+    report_sent_at TIMESTAMP NULL DEFAULT NULL,
+
+    -- [Comment] 부가 정보 및 비용
+    reason VARCHAR(255),                                  -- 좀비로 판정된 이유 (CPU/NET 수치 등)
+    wasted_cost DECIMAL(10, 5) DEFAULT 0.0,               -- 이 파드를 삭제함으로써 절약한 비용
+
+    -- [Comment] 조회 성능 및 중복 방지 설정
+    INDEX idx_status (status),
+    UNIQUE KEY uq_pod (pod_name, namespace)              -- 같은 파드가 중복 등록되지 않도록 설정
+);
