@@ -1,0 +1,13 @@
+{
+  "receiver": "email-cloud-janitor",
+  "group_by": ["alertname", "namespace", "pod"],
+  "group_wait": "10s",
+  "group_interval": "1m",
+  "repeat_interval": "24h",
+  "routes": [
+    {
+      "receiver": "email-cloud-janitor",
+      "object_matchers": [["team", "=", "cloud-janitor"]]
+    }
+  ]
+}
