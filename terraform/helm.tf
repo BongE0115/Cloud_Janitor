@@ -31,6 +31,51 @@ resource "helm_release" "prometheus_stack" {
     value = "30080"
   }
 
+  set {
+    name  = "grafana.assertNoLeakedSecrets"
+    value = "false"
+  }
+
+  # SMTP 활성화
+  set {
+    name  = "grafana.grafana\\.ini.smtp.enabled"
+    value = "true"
+  }
+
+  # Gmail 호스트 설정
+  set {
+    name  = "grafana.grafana\\.ini.smtp.host"
+    value = "smtp.gmail.com:587"
+  }
+
+  # 발송 계정 이메일
+  set {
+    name  = "grafana.grafana\\.ini.smtp.user"
+    value = "moanuna03@tukorea.ac.kr"
+  }
+
+  # 앱 비밀번호 (16자리, set_sensitive 사용 추천)
+  set_sensitive {
+    name  = "grafana.grafana\\.ini.smtp.password"
+    value = local.smtp_password
+  }
+
+  # 발송인 주소 및 이름
+  set {
+    name  = "grafana.grafana\\.ini.smtp.from_address"
+    value = "moanuna03@tukorea.ac.kr"
+  }
+  set {
+    name  = "grafana.grafana\\.ini.smtp.from_name"
+    value = "Cloud-Janitor-Alert"
+  }
+
+  # 보안 정책 (MandatoryStartTLS)
+  set {
+    name  = "grafana.grafana\\.ini.smtp.startTLS_policy"
+    value = "MandatoryStartTLS"
+  }
+
   # sidecar datasource 완전 비활성화 → Ansible에서 직접 관리
   set {
     name  = "grafana.sidecar.datasources.enabled"
