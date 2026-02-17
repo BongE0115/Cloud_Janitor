@@ -49,8 +49,4 @@ MANIFEST
 *.swo
 terraform/cloud-janitor-cluster-config
 
-# SSH Tunnel
-.ssh_tunnel_pid
-.cj_state
-
 .docker/

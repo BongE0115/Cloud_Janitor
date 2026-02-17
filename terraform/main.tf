@@ -61,6 +61,16 @@ resource "kind_cluster" "default" {
         container_port = 30306 # MySQL NodePort
         host_port      = 3306  # localhost:3306
       }
+
+      extra_port_mappings {
+        container_port = 30800 # Cloud Janitor NodePort
+        host_port      = 30800 # localhost:30800
+      }
+
+      extra_port_mappings {
+        container_port = 31000 # Loki NodePort
+        host_port      = 31000 # localhost:31000
+      }
     }
   }
 }

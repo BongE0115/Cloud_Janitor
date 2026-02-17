@@ -10,11 +10,28 @@ clients:
 
 scrape_configs:
   - job_name: docker
-    static_configs:
-      - targets:
-          - localhost
-        labels:
-          job: docker
-          __path__: /var/lib/docker/containers/*/*.log
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+        regex: '${TC_COMPOSE_PROJECT}'
+        action: keep
+      - target_label: 'job'
+        replacement: 'tc-docker'
+      - source_labels: ['__meta_docker_container_id']
+        regex: '(.*)'
+        target_label: '__path__'
+        replacement: /var/lib/docker/containers/$1/*.log
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container_name'
+      - source_labels: ['__meta_docker_container_id']
+        regex: '(.{12}).*'
+        target_label: 'container_id'
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: 'compose_service'
     pipeline_stages:
       - docker: {}
+      - static_labels:
+          job: tc-docker

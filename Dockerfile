@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1
 COPY pyproject.toml .
 # pyproject.toml이 없다면 아래 줄 주석 해제 후 사용:
 # RUN pip install --no-cache-dir kubernetes requests mysql-connector-python
-RUN pip install --no-cache-dir kubernetes requests mysql-connector-python
+RUN pip install --no-cache-dir kubernetes requests mysql-connector-python python-dotenv docker
 
 # 5. 소스 코드 전체 복사
 COPY . .

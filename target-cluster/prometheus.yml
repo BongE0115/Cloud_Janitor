@@ -9,7 +9,7 @@ global:
   # 규칙 평가 주기
   evaluation_interval: 15s
   # 외부 라벨 (Management Cluster에서 식별용)
-    external_labels:
+  external_labels:
     cluster: 'tc'
     environment: 'production'
 

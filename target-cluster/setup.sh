@@ -43,13 +43,13 @@ OPTIONS:
     --no-pull       이미지 pull 건너뜀
     --detach        백그라운드 모드로 실행 (기본값)
     --apps-only     앱 컨테이너만 실행
-    --prometheus-only  Prometheus와 cAdvisor만 실행
+    --prometheus-only  Prometheus + cAdvisor + Promtail 실행
 
 EXAMPLES:
     $0                    # 기본 설치
     $0 --no-pull          # 이미지 pull 없이 설치
     $0 --apps-only        # 앱만 실행
-    $0 --prometheus-only  # Prometheus만 실행
+    $0 --prometheus-only  # Prometheus + Promtail 실행
 EOF
     exit 0
 }
@@ -173,9 +173,9 @@ fi
 log_info "컨테이너 시작 중..."
 if [ "$MODE" = "apps" ]; then
     if command -v docker-compose &> /dev/null; then
-        docker-compose up -d promtail app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
+        docker-compose up -d app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
     else
-        docker compose up -d promtail app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
+        docker compose up -d app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
     fi
 elif [ "$MODE" = "prometheus" ]; then
     if command -v docker-compose &> /dev/null; then
@@ -282,6 +282,7 @@ if [ "$MODE" = "prometheus" ]; then
     echo "📊 주요 서비스:"
     echo "   - Prometheus:       http://localhost:9091"
     echo "   - cAdvisor:        http://localhost:8080"
+    echo "   - Promtail:        http://localhost:9080"
     echo ""
     echo "📦 실행 중인 컨테이너:"
     docker ps --format "   - {{.Names}} ({{.Status}})" --filter "network=tc-network"

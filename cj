@@ -3,13 +3,13 @@
 # =============================================================================
 # Cloud Janitor CLI Tool
 # 
-# Cloud Janitor는 기존의 target-cluster에 연결(attach)하여
-# target 내부에 Prometheus를 설치하고 모니터링하는 시스템
+# Cloud Janitor는 TC(Target Cluster)에 연결(attach)하여
+# TC Prometheus를 기반으로 감지/정리 작업을 수행하는 시스템
 #
 # 사용법:
 #   cj install           # cj CLI 시스템 PATH에 등록 (설치)
 #   cj init              # 프로젝트 초기화
-#   cj setup             # 전체 설정 (target Prometheus 설치 + Mgmt Cluster 생성)
+#   cj setup             # 전체 설정 (Mgmt Cluster 생성/준비)
 #   cj start             # 서비스 시작
 #   cj stop              # 서비스 중지
 #   cj tunnel <cmd>      # SSH 터널 관리 (setup, stop, status)
@@ -21,9 +21,9 @@
 #   cj help              # 도움말
 #
 # 아키텍처:
-#   - target-cluster: 외부 서버에서 실행되는 Docker Compose 환경
-#   - cj (Cloud Janitor): target에 SSH 터널을 통한 안전한 접근
-#   - Management Cluster: cj에서 생성하는 Kind K8s (Grafana, Loki)
+#   - target-cluster: TC 측 Docker Compose 환경
+#   - cj (Cloud Janitor): Management Cluster 운영 + TC 등록 관리
+#   - Management Cluster: cj에서 생성하는 Kind K8s (Janitor, Grafana, Loki, MySQL)
 # =============================================================================
 
 set -e  # 에러 발생 시 즉시 종료
@@ -74,10 +74,7 @@ TERRAFORM_DIR="$CJ_HOME/terraform"
 ANSIBLE_DIR="$CJ_HOME/ansible"
 SCRIPTS_DIR="$CJ_HOME/scripts"
 
-# 상태 파일
-STATE_FILE="$CJ_HOME/.cj_state"
-
-# Target 주소 (현재는 localhost, 실제로는 다른 서버)
+# Target 주소 (터널 명령 fallback 용)
 TARGET_HOST="${TARGET_HOST:-localhost}"
 
 # =============================================================================
@@ -135,12 +132,30 @@ check_kubectl() {
     fi
 }
 
+ensure_cloud_janitor_image() {
+    check_docker
+
+    if ! docker image inspect cloud-janitor:latest >/dev/null 2>&1; then
+        log_info "Cloud Janitor 이미지 빌드 중..."
+        docker build -t cloud-janitor:latest "$CJ_HOME"
+    else
+        log_info "Cloud Janitor 이미지가 이미 존재합니다."
+    fi
+
+    if command -v kind &> /dev/null; then
+        if kind get clusters 2>/dev/null | grep -q "^cloud-janitor-cluster$"; then
+            log_info "kind 클러스터에 이미지 로드 중..."
+            kind load docker-image cloud-janitor:latest --name cloud-janitor-cluster
+        fi
+    fi
+}
+
 # .env 파일 확인
 check_env_file() {
     if [ ! -f "$CJ_HOME/.env" ]; then
         log_warning ".env 파일이 없습니다. .env.example을 복사합니다."
         cp "$CJ_HOME/.env.example" "$CJ_HOME/.env"
-        log_warning ".env 파일을 설정해주세요. (특히 GRAFANA_PASSWORD, TARGET_HOST)"
+        log_warning ".env 파일을 설정해주세요. (특히 GRAFANA_PASSWORD)"
         return 1
     fi
     return 0
@@ -148,16 +163,19 @@ check_env_file() {
 
 # SSH 터널 설정
 setup_ssh_tunnel() {
-    check_env_file
-    source "$CJ_HOME/.env"
-    
-    # SSH 터널 설정 확인
-    USE_SSH_TUNNEL="${USE_SSH_TUNNEL:-true}"
-    TARGET_HOST="${TARGET_HOST:-localhost}"
-    TARGET_SSH_USER="${TARGET_SSH_USER:-root}"
-    TARGET_SSH_PORT="${TARGET_SSH_PORT:-22}"
-    TARGET_SSH_KEY="${TARGET_SSH_KEY:-~/.ssh/id_rsa}"
-    PROMETHEUS_PORT="${PROMETHEUS_PORT:-9091}"
+    if [ -f "$CJ_HOME/.env" ]; then
+        # shellcheck disable=SC1090
+        source "$CJ_HOME/.env"
+    fi
+
+    # CLI 옵션이 있으면 우선 사용, 없으면 .env/기본값 사용
+    USE_SSH_TUNNEL="${CLI_USE_SSH_TUNNEL:-${USE_SSH_TUNNEL:-true}}"
+    TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
+    TARGET_SSH_USER="${CLI_TARGET_SSH_USER:-${TARGET_SSH_USER:-root}}"
+    TARGET_SSH_PORT="${CLI_TARGET_SSH_PORT:-${TARGET_SSH_PORT:-22}}"
+    TARGET_SSH_KEY="${CLI_TARGET_SSH_KEY:-${TARGET_SSH_KEY:-~/.ssh/id_rsa}}"
+    PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
+    LOCAL_PROMETHEUS_PORT="${CLI_LOCAL_PORT:-${LOCAL_PROMETHEUS_PORT:-9091}}"
     
     # 로컬이면 터널 필요 없음
     if [ "$TARGET_HOST" = "localhost" ]; then
@@ -172,14 +190,14 @@ setup_ssh_tunnel() {
     fi
     
     # 이미 SSH 터널이 실행 중인지 확인
-    SSH_TUNNEL_PID=$(pgrep -f "ssh.*${TARGET_HOST}.*${PROMETHEUS_PORT}" || true)
+    SSH_TUNNEL_PID=$(pgrep -f "ssh.*localhost:${LOCAL_PROMETHEUS_PORT}:${TARGET_HOST}:${PROMETHEUS_PORT}" || true)
     if [ -n "$SSH_TUNNEL_PID" ]; then
         log_info "SSH 터널이 이미 실행 중입니다 (PID: $SSH_TUNNEL_PID)"
         return 0
     fi
     
     # SSH 터널 생성
-    log_info "SSH 터널 생성 중: ${TARGET_HOST}:${PROMETHEUS_PORT} -> localhost:${PROMETHEUS_PORT}"
+    log_info "SSH 터널 생성 중: ${TARGET_HOST}:${PROMETHEUS_PORT} -> localhost:${LOCAL_PROMETHEUS_PORT}"
     log_info "SSH 사용자: ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
     log_info "SSH 키: ${TARGET_SSH_KEY}"
     
@@ -191,7 +209,7 @@ setup_ssh_tunnel() {
     
     # SSH 터널 백그라운드 실행
     ssh -i "$TARGET_SSH_KEY" \
-        -L "localhost:${PROMETHEUS_PORT}:${TARGET_HOST}:${PROMETHEUS_PORT}" \
+        -L "localhost:${LOCAL_PROMETHEUS_PORT}:${TARGET_HOST}:${PROMETHEUS_PORT}" \
         -N \
         -p "${TARGET_SSH_PORT}" \
         "${TARGET_SSH_USER}@${TARGET_HOST}" \
@@ -205,7 +223,6 @@ setup_ssh_tunnel() {
     # SSH 터널 확인
     if ps -p "$SSH_TUNNEL_PID" > /dev/null 2>&1; then
         log_success "SSH 터널 생성 성공 (PID: $SSH_TUNNEL_PID)"
-        echo "$SSH_TUNNEL_PID" > "$CJ_HOME/.ssh_tunnel_pid"
     else
         log_error "SSH 터널 생성 실패"
         return 1
@@ -214,76 +231,144 @@ setup_ssh_tunnel() {
 
 # SSH 터널 해제
 teardown_ssh_tunnel() {
-    SSH_TUNNEL_PID_FILE="$CJ_HOME/.ssh_tunnel_pid"
-    
-    if [ ! -f "$SSH_TUNNEL_PID_FILE" ]; then
-        log_info "SSH 터널 PID 파일을 찾을 수 없습니다."
+    if [ -f "$CJ_HOME/.env" ]; then
+        # shellcheck disable=SC1090
+        source "$CJ_HOME/.env"
+    fi
+
+    TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
+    PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
+    LOCAL_PROMETHEUS_PORT="${CLI_LOCAL_PORT:-${LOCAL_PROMETHEUS_PORT:-9091}}"
+    local tunnel_pattern="ssh.*localhost:${LOCAL_PROMETHEUS_PORT}:${TARGET_HOST}:${PROMETHEUS_PORT}"
+    local pids
+    pids=$(pgrep -f "$tunnel_pattern" || true)
+
+    if [ -z "$pids" ]; then
+        log_info "실행 중인 SSH 터널이 없습니다."
         return 0
     fi
-    
-    SSH_TUNNEL_PID=$(cat "$SSH_TUNNEL_PID_FILE")
-    
-    if ps -p "$SSH_TUNNEL_PID" > /dev/null 2>&1; then
-        log_info "SSH 터널 종료 중 (PID: $SSH_TUNNEL_PID)..."
-        kill "$SSH_TUNNEL_PID"
-        log_success "SSH 터널 종료 완료"
-    else
-        log_info "SSH 터널이 이미 종료되었습니다."
-    fi
-    
-    rm -f "$SSH_TUNNEL_PID_FILE"
+
+    log_info "SSH 터널 종료 중..."
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    log_success "SSH 터널 종료 완료"
 }
 
-# SSH 연결 확인
-check_ssh_connection() {
-    check_env_file
-    source "$CJ_HOME/.env"
-    
-    TARGET_HOST="${TARGET_HOST:-localhost}"
-    TARGET_SSH_USER="${TARGET_SSH_USER:-root}"
-    TARGET_SSH_PORT="${TARGET_SSH_PORT:-22}"
-    TARGET_SSH_KEY="${TARGET_SSH_KEY:-~/.ssh/id_rsa}"
-    
-    # 로컬이면 무시
-    if [ "$TARGET_HOST" = "localhost" ]; then
-        return 0
-    fi
-    
-    log_info "SSH 연결 확인 중: ${TARGET_SSH_USER}@${TARGET_HOST}:${TARGET_SSH_PORT}"
-    
-    if ssh -i "$TARGET_SSH_KEY" \
-        -p "${TARGET_SSH_PORT}" \
-        -o ConnectTimeout=5 \
-        -o BatchMode=yes \
-        "${TARGET_SSH_USER}@${TARGET_HOST}" \
-        exit 2>/dev/null; then
-        log_success "SSH 연결 성공"
-        return 0
-    else
-        log_error "SSH 연결 실패"
-        log_info "  - SSH 키 확인: $TARGET_SSH_KEY"
-        log_info "  - 호스트 확인: $TARGET_HOST:$TARGET_SSH_PORT"
-        log_info "  - 사용자 확인: $TARGET_SSH_USER"
-        return 1
-    fi
+parse_tunnel_options() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --host)
+                CLI_TARGET_HOST="$2"
+                shift 2
+                ;;
+            --user)
+                CLI_TARGET_SSH_USER="$2"
+                shift 2
+                ;;
+            --port)
+                CLI_TARGET_SSH_PORT="$2"
+                shift 2
+                ;;
+            --key)
+                CLI_TARGET_SSH_KEY="$2"
+                shift 2
+                ;;
+            --remote-port)
+                CLI_PROMETHEUS_PORT="$2"
+                shift 2
+                ;;
+            --local-port)
+                CLI_LOCAL_PORT="$2"
+                shift 2
+                ;;
+            --enable|--use)
+                CLI_USE_SSH_TUNNEL="true"
+                shift
+                ;;
+            --disable|--no-use)
+                CLI_USE_SSH_TUNNEL="false"
+                shift
+                ;;
+            *)
+                log_error "알 수 없는 tunnel 옵션: $1"
+                echo "예시: cj tunnel setup --host 10.0.0.5 --user ubuntu --key ~/.ssh/id_rsa --remote-port 9091 --local-port 9091"
+                exit 1
+                ;;
+        esac
+    done
 }
 
-# State 파일 로드
+start_port_forward() {
+    if command -v curl &> /dev/null; then
+        if curl -s -o /dev/null -w "%{http_code}" http://localhost:30800/health 2>/dev/null | grep -q "^200$"; then
+            return 0
+        fi
+    fi
+
+    if pgrep -f "port-forward.*service/cloud-janitor.*30800:8000" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! kubectl get service cloud-janitor -n default &> /dev/null; then
+        return 0
+    fi
+
+    pkill -f "port-forward.*service/cloud-janitor.*30800:8000" 2>/dev/null || true
+    nohup kubectl port-forward -n default service/cloud-janitor 30800:8000 >/tmp/cj-port-forward.log 2>&1 &
+    sleep 1
+}
+
+stop_port_forward() {
+    pkill -f "port-forward.*service/cloud-janitor.*30800:8000" 2>/dev/null || true
+}
+
+start_loki_port_forward() {
+    if command -v curl &> /dev/null; then
+        if curl -s -o /dev/null -w "%{http_code}" http://localhost:31000/ready 2>/dev/null | grep -q "^200$"; then
+            return 0
+        fi
+    fi
+
+    if pgrep -f "port-forward.*service/loki.*31000:3100" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! kubectl get service loki -n monitoring &> /dev/null; then
+        return 0
+    fi
+
+    # Kill any existing port-forward on same port
+    pkill -f "port-forward.*loki.*31000" 2>/dev/null || true
+    sleep 1
+
+    nohup kubectl port-forward -n monitoring service/loki 31000:3100 >/tmp/cj-loki-port-forward.log 2>&1 &
+    
+    # Wait for port-forward to be ready
+    sleep 3
+    local retries=0
+    while [ $retries -lt 10 ]; do
+        if curl -s http://localhost:31000/ready > /dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        retries=$((retries + 1))
+    done
+    log_warning "Loki 포트포워드 연결 실패"
+    return 1
+}
+
+stop_loki_port_forward() {
+    pkill -f "port-forward.*service/loki.*31000:3100" 2>/dev/null || true
+}
+
+# 상태값은 파일에 저장하지 않고 런타임에서 계산
 load_state() {
-    if [ -f "$STATE_FILE" ]; then
-        source "$STATE_FILE"
-    fi
+    return 0
 }
 
-# State 파일 저장
+# 상태값은 파일에 저장하지 않고 런타임에서 계산
 save_state() {
-    cat > "$STATE_FILE" << EOF
-CJ_HOME="$CJ_HOME"
-TF_INITIALIZED="${TF_INITIALIZED:-false}"
-MGMT_CLUSTER_CREATED="${MGMT_CLUSTER_CREATED:-false}"
-TARGET_PROMETHEUS_INSTALLED="${TARGET_PROMETHEUS_INSTALLED:-false}"
-CLOUD_JANITOR_DEPLOYED="${CLOUD_JANITOR_DEPLOYED:-false}"
-EOF
+    return 0
 }
 
 # =============================================================================
@@ -298,9 +383,12 @@ show_help() {
     echo -e "${BOLD}설치:${NC}"
     echo "  install           cj CLI 시스템 PATH에 등록 (설치)"
     echo ""
+    echo -e "${BOLD}자동화:${NC}"
+    echo "  bootstrap         전체 자동 설정 (install + init + setup + start)"
+    echo ""
     echo -e "${BOLD}프로젝트 관리:${NC}"
     echo "  init              프로젝트 초기화 (.env 파일 생성, 의존성 설치 확인)"
-    echo "  setup             전체 설정 (Target Prometheus 확인 + Mgmt Cluster 생성)"
+    echo "  setup             전체 설정 (Mgmt Cluster 생성 + 앱 준비)"
     echo "  start             서비스 시작"
     echo "  stop              서비스 중지"
     echo "  clear             로컬 상태/파일 정리"
@@ -314,14 +402,15 @@ show_help() {
     echo "  tf output         Terraform 출력값 확인"
     echo "  tf shell          Terraform 쉘 실행 (terraform 명령어 직접 사용)"
     echo ""
-    echo -e "${BOLD}Ansible (Target Prometheus 확인):${NC}"
-    echo "  ans install       Target Prometheus 접속 확인"
-    echo "  ans configure     Prometheus 설정 및 Grafana 연동"
+    echo -e "${BOLD}Ansible (레거시/수동):${NC}"
+    echo "  ans install       (레거시) Target Prometheus 접속 확인"
+    echo "  ans configure     (레거시) 수동 연동 작업"
     echo "  ans shell         Ansible playbook 실행 쉘"
     echo ""
     echo -e "${BOLD}상태 및 로그:${NC}"
     echo "  status            전체 시스템 상태 확인"
     echo "  logs [service]    로그 확인 (janitor, mysql, grafana, loki)"
+    echo "  scan              Cloud Janitor 수동 1회 스캔 실행"
     echo ""
     echo -e "${BOLD}접속:${NC}"
     echo "  grafana           Grafana 접속"
@@ -334,21 +423,22 @@ show_help() {
     echo "  help              이 도움말 표시"
     echo ""
     echo -e "${BOLD}SSH 터널 (외부 Target 접근용):${NC}"
-    echo "  tunnel setup      SSH 터널 생성 (localhost:9091 → TARGET_HOST:9091)"
+    echo "  tunnel setup      SSH 터널 생성 (옵션 우선, .env는 fallback)"
     echo "  tunnel stop       SSH 터널 종료"
     echo "  tunnel status     SSH 터널 상태 확인"
     echo ""
     echo -e "${BOLD}예시:${NC}"
-    echo "  cj install                   # cj CLI 설치"
-    echo "  cj init                      # 프로젝트 초기화"
-    echo "  cj setup                     # 전체 설정"
-    echo "  cj status                    # 상태 확인"
-    echo "  cj logs janitor              # Cloud Janitor 로그"
-    echo "  cj stop                      # 서비스 중지"
+    echo "  cj bootstrap               # 전체 자동 설정"
+    echo "  cj install                 # cj CLI 설치"
+    echo "  cj init                    # 프로젝트 초기화"
+    echo "  cj setup                   # 전체 설정"
+    echo "  cj status                  # 상태 확인"
+    echo "  cj logs janitor            # Cloud Janitor 로그"
+    echo "  cj stop                    # 서비스 중지"
     echo ""
     echo -e "${BOLD}환경 변수:${NC}"
     echo "  CJ_HOME         Cloud Janitor 프로젝트 경로 (기본값: cj 스크립트 위치)"
-    echo "  TARGET_HOST     Target 서버 주소 (기본값: localhost)"
+    echo "  TARGET_HOST     터널 명령 fallback 호스트 (권장: tunnel 옵션 사용)"
     echo ""
 }
 
@@ -358,7 +448,6 @@ Cloud Janitor CLI Tool v1.0.0
 Zombie Pod Detection and Auto-Cleanup System
 
 Project Path: $CJ_HOME
-Target Host: $TARGET_HOST
 EOF
 }
 
@@ -395,8 +484,7 @@ cmd_init() {
     rm -f "$CJ_HOME/terraform/terraform.tfstate.backup"
     rm -f "$CJ_HOME/terraform/terraform.tfstate.lock.info"
     rm -rf "$CJ_HOME/terraform/.terraform"
-    rm -f "$STATE_FILE"
-    rm -f "$CJ_HOME/.ssh_tunnel_pid"
+    teardown_ssh_tunnel || true
 
     if command -v kind &> /dev/null; then
         if kind get clusters 2>/dev/null | grep -q "^cloud-janitor-cluster$"; then
@@ -434,7 +522,6 @@ cmd_init() {
         cp "$CJ_HOME/.env.example" "$CJ_HOME/.env"
         log_success ".env 파일 생성 완료"
         log_warning ".env 파일을 설정해주세요 (vim $CJ_HOME/.env)"
-        log_warning "특히 TARGET_HOST를 설정하세요 (기본값: localhost)"
     else
         log_info ".env 파일이 이미 존재합니다."
     fi
@@ -616,79 +703,37 @@ cmd_setup() {
     check_cj_home
     check_env_file || exit 1
 
-    # .env 파일 로드
-    source "$CJ_HOME/.env"
-
-    # TARGET_HOST 설정 확인
-    if [ -z "$TARGET_HOST" ]; then
-        TARGET_HOST="localhost"
-        log_warning "TARGET_HOST가 설정되지 않아 기본값(localhost)을 사용합니다."
-        log_info ".env 파일에서 TARGET_HOST를 설정하세요."
-    fi
-
-    log_info "Target Host: $TARGET_HOST"
-    echo ""
-
-    # SSH 터널 설정 (외부 Target일 경우)
-    if [ "$TARGET_HOST" != "localhost" ]; then
-        log_info "외부 Target Cluster 감지됨. SSH 터널을 설정합니다."
-        
-        # SSH 연결 확인
-        if ! check_ssh_connection; then
-            log_error "SSH 연결 실패. 설정을 확인하세요."
-            exit 1
-        fi
-        
-        # SSH 터널 설정
-        setup_ssh_tunnel || exit 1
-    fi
-
-    # 스크립트 종료 시 SSH 터널 해제
-    trap teardown_ssh_tunnel EXIT
-
-    # 1. Target Prometheus 확인
-    log_info "STEP 1/4: Target Prometheus 확인"
-    cmd_ans install
-
-    # 2. Terraform 초기화
-    if [ "$TF_INITIALIZED" != "true" ]; then
-        log_info "STEP 2/4: Terraform 초기화"
+    # 1. Terraform 초기화
+    if [ ! -d "$CJ_HOME/terraform/.terraform" ]; then
+        log_info "STEP 1/3: Terraform 초기화"
         cmd_tf init
     else
-        log_info "STEP 2/4: Terraform 이미 초기화됨"
+        log_info "STEP 1/3: Terraform 이미 초기화됨"
     fi
 
-    # 3. Management Cluster 생성
-    if [ "$MGMT_CLUSTER_CREATED" != "true" ]; then
-        log_info "STEP 3/4: Management Cluster 생성"
+    # 2. Management Cluster 생성
+    if ! (command -v kind &> /dev/null && kind get clusters 2>/dev/null | grep -q "^cloud-janitor-cluster$"); then
+        log_info "STEP 2/3: Management Cluster 생성"
         cmd_tf apply -auto-approve
+        log_info "STEP 2.5/3: Cloud Janitor 이미지 빌드 및 kind 클러스터에 로드"
+        ensure_cloud_janitor_image
     else
-        log_info "STEP 3/4: Management Cluster 이미 생성됨"
+        log_info "STEP 2/3: Management Cluster 이미 생성됨"
+        # 이미지가 존재하는지 확인 후 kind에 로드
+        ensure_cloud_janitor_image
     fi
 
-    # 4. Prometheus 설정 및 Grafana 연동
-    log_info "STEP 4/4: Prometheus 설정 및 Grafana 연동"
-    cmd_ans configure
-    if [ "$TARGET_PROMETHEUS_INSTALLED" != "true" ]; then
-        log_warning "Target Prometheus가 아직 실행되지 않았습니다."
-        log_info "다음 순서로 진행하세요:"
-        echo "   tc pm start"
-        echo "   cj ans configure"
-    fi
-
-    # SSH 터널 유지 안내
-    if [ "$TARGET_HOST" != "localhost" ]; then
-        log_step "🔐 SSH 터널 유지"
-        log_warning "SSH 터널이 백그라운드에서 실행 중입니다."
-        log_warning "종료하려면: Ctrl+C 또는 cj tunnel stop"
-        log_info "SSH 터널 확인: cj tunnel status"
-    fi
+    # 3. 안내
+    log_info "STEP 3/3: 서비스 준비 완료 (Target 연동은 tc connect로 진행)"
+    log_info "다음 순서로 진행하세요:"
+    echo "   cj start"
+    echo "   tc connect -a <CJ_HOST>"
 
     log_step "🎉 전체 설정 완료"
     echo ""
     log_info "접속 정보:"
-    echo "   📊 Target Prometheus:  http://$TARGET_HOST:9091"
     echo "   📈 Grafana (Mgmt):     http://localhost:3000"
+    echo "   🐍 CJ API:             http://localhost:30800 (cj start 이후)"
     echo ""
     log_info "상태 확인:"
     echo "   cj status"
@@ -705,41 +750,55 @@ cmd_start() {
     log_step "🚀 서비스 시작"
 
     check_cj_home
-    load_state
 
     log_info "Cloud Janitor 서비스를 시작합니다..."
 
-    # Management Cluster가 생성되어 있는지 확인
-    if [ "$MGMT_CLUSTER_CREATED" != "true" ]; then
-        log_warning "Management Cluster가 생성되지 않았습니다."
+    # kubeconfig 설정
+    local kubeconfig_path="$CJ_HOME/terraform/cloud-janitor-cluster-config"
+    if [ ! -f "$kubeconfig_path" ]; then
+        log_warning "Management Cluster kubeconfig를 찾을 수 없습니다."
+        log_info "먼저 다음을 실행하세요: cj setup"
+        exit 1
+    fi
+    export KUBECONFIG="$kubeconfig_path"
+    if ! kubectl get namespace default >/dev/null 2>&1; then
+        log_warning "Management Cluster에 연결할 수 없습니다."
         log_info "먼저 다음을 실행하세요: cj setup"
         exit 1
     fi
 
-    # kubeconfig 설정
-    export KUBECONFIG="$CJ_HOME/terraform/cloud-janitor-cluster-config"
+    ensure_cloud_janitor_image
 
-    # Cloud Janitor Pod가 실행 중인지 확인
+    cd "$CJ_HOME"
+    export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
+    export ANSIBLE_ROLES_PATH="$ANSIBLE_DIR/roles"
+    export ANSIBLE_LOCAL_TMP="${ANSIBLE_LOCAL_TMP:-/tmp/ansible}"
+    export ANSIBLE_REMOTE_TMP="${ANSIBLE_REMOTE_TMP:-/tmp/ansible}"
+    mkdir -p "$ANSIBLE_LOCAL_TMP"
+    ensure_uv_sync
+
     if kubectl get deployment cloud-janitor -n default &> /dev/null; then
         log_info "Cloud Janitor Deployment가 이미 존재합니다."
-        log_info "Deployment를 재시작합니다..."
-        kubectl rollout restart deployment/cloud-janitor -n default
+        log_info "최신 설정(ConfigMap/코드 주입) 적용 중..."
     else
         log_warning "Cloud Janitor Deployment를 찾을 수 없습니다."
         log_info "Ansible로 Cloud Janitor를 배포합니다..."
-        cd "$CJ_HOME"
-        export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
-        export ANSIBLE_ROLES_PATH="$ANSIBLE_DIR/roles"
-        export ANSIBLE_LOCAL_TMP="${ANSIBLE_LOCAL_TMP:-/tmp/ansible}"
-        export ANSIBLE_REMOTE_TMP="${ANSIBLE_REMOTE_TMP:-/tmp/ansible}"
-        mkdir -p "$ANSIBLE_LOCAL_TMP"
-        ensure_uv_sync
-        uv run ansible-playbook "$ANSIBLE_DIR/playbooks/setup-cluster.yml"
     fi
+
+    uv run ansible-playbook "$ANSIBLE_DIR/playbooks/setup-cluster.yml"
+    log_info "Deployment를 재시작합니다..."
+    kubectl rollout restart deployment/cloud-janitor -n default
+    log_info "Cloud Janitor Deployment 준비 대기 중..."
+    kubectl rollout status deployment/cloud-janitor -n default --timeout=180s
 
     # 상태 확인
     log_info "Pod 상태 확인 중..."
     kubectl get pods -n default -l app=cloud-janitor
+
+    start_port_forward
+    log_info "cj API 포트포워드: http://localhost:30800"
+    start_loki_port_forward
+    log_info "Loki 포트포워드: http://localhost:31000"
 
     log_success "서비스 시작 완료"
     log_info "로그 확인: cj logs janitor"
@@ -772,6 +831,9 @@ cmd_stop() {
         log_warning "Cloud Janitor Deployment를 찾을 수 없습니다."
     fi
 
+    stop_port_forward
+    stop_loki_port_forward
+
     log_info "서비스가 중지되었습니다."
     log_info "다시 시작하려면: cj start"
     echo ""
@@ -779,35 +841,56 @@ cmd_stop() {
     echo "   cj start"
 }
 
-cmd_clear() {
-    log_step "🧹 로컬 정리"
-
-    check_cj_home
-
-    rm -f "$CJ_HOME/.ssh_tunnel_pid"
+purge_terraform_artifacts() {
     rm -f "$CJ_HOME/terraform/cloud-janitor-cluster-config"
-    rm -f "$CJ_HOME/terraform/terraform.tfstate"
-    rm -f "$CJ_HOME/terraform/terraform.tfstate.backup"
-    rm -f "$CJ_HOME/terraform/terraform.tfstate.lock.info"
+    rm -f "$CJ_HOME/terraform/terraform.tfstate"*
     rm -f "$CJ_HOME/terraform/.terraform.lock.hcl"
+    rm -f "$CJ_HOME/terraform/terraform.tfstate.lock.info"
     rm -rf "$CJ_HOME/terraform/.terraform"
+}
 
-    TF_INITIALIZED=false
-    MGMT_CLUSTER_CREATED=false
-    TARGET_PROMETHEUS_INSTALLED=false
-    CLOUD_JANITOR_DEPLOYED=false
-    save_state
+destroy_management_cluster() {
+    if ! command -v terraform &> /dev/null; then
+        log_warning "terraform가 없어 destroy를 건너뜁니다."
+        return 0
+    fi
+
+    cd "$TERRAFORM_DIR"
+    terraform init -input=false >/dev/null 2>&1 || true
+
+    if terraform state list >/dev/null 2>&1; then
+        log_info "Terraform destroy 실행 중..."
+        terraform destroy -auto-approve || true
+    fi
 
     if command -v kind &> /dev/null; then
         if kind get clusters 2>/dev/null | grep -q "^cloud-janitor-cluster$"; then
-            log_warning "kind 클러스터는 남아있습니다. 필요하면 cj tf destroy를 실행하세요."
+            log_warning "kind 클러스터가 남아 있어 강제 삭제합니다..."
+            kind delete cluster --name cloud-janitor-cluster || true
         fi
     fi
+}
+
+cmd_clear() {
+    log_step "🧹 완전 정리"
+
+    check_cj_home
+
+    stop_port_forward
+    stop_loki_port_forward
+    teardown_ssh_tunnel || true
+    destroy_management_cluster
+    purge_terraform_artifacts
+    TF_INITIALIZED=false
+    MGMT_CLUSTER_CREATED=false
+    CLOUD_JANITOR_DEPLOYED=false
+    save_state
 
     log_success "로컬 상태 정리 완료"
     echo ""
+    log_info "Management Cluster + 로컬 상태 정리 완료"
     log_info "다음 명령어 추천:"
-    echo "   cj tf init"
+    echo "   cj init"
 }
 
 # =============================================================================
@@ -895,7 +978,7 @@ cmd_tf() {
             log_info "kubeconfig: $CJ_HOME/terraform/cloud-janitor-cluster-config"
             echo ""
             log_info "다음 명령어 추천:"
-            echo "   cj ans configure"
+            echo "   cj start"
             ;;
         destroy)
             log_step "🗑️  Terraform 삭제"
@@ -912,26 +995,17 @@ cmd_tf() {
             echo "   cj init"
             ;;
         clear)
-            log_step "🧹 Terraform 로컬 상태 정리"
-            rm -f "$CJ_HOME/terraform/cloud-janitor-cluster-config"
-            rm -f "$CJ_HOME/terraform/terraform.tfstate"
-            rm -f "$CJ_HOME/terraform/terraform.tfstate.backup"
-            rm -f "$CJ_HOME/terraform/terraform.tfstate.lock.info"
-            rm -f "$CJ_HOME/terraform/.terraform.lock.hcl"
-            rm -rf "$CJ_HOME/terraform/.terraform"
+            log_step "🧹 Terraform 완전 정리"
+            destroy_management_cluster
+            purge_terraform_artifacts
             TF_INITIALIZED=false
             MGMT_CLUSTER_CREATED=false
             CLOUD_JANITOR_DEPLOYED=false
             save_state
-            if command -v kind &> /dev/null; then
-                if kind get clusters 2>/dev/null | grep -q "^cloud-janitor-cluster$"; then
-                    log_warning "kind 클러스터는 남아있습니다. 필요하면 cj tf destroy를 실행하세요."
-                fi
-            fi
-            log_success "Terraform 로컬 상태 정리 완료"
+            log_success "Terraform 완전 정리 완료"
             echo ""
             log_info "다음 명령어 추천:"
-            echo "   cj tf init"
+            echo "   cj init"
             ;;
         output)
             terraform output "$@"
@@ -972,10 +1046,10 @@ cmd_ans() {
     export DOCKER_CONFIG="$CJ_HOME/.docker"
 
     # .env 파일 로드
-    source "$CJ_HOME/.env"
-
-    # TARGET_HOST 설정
-    TARGET_HOST="${TARGET_HOST:-localhost}"
+    if [ -f "$CJ_HOME/.env" ]; then
+        # shellcheck disable=SC1090
+        source "$CJ_HOME/.env"
+    fi
 
     export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
     export ANSIBLE_ROLES_PATH="$ANSIBLE_DIR/roles"
@@ -987,68 +1061,24 @@ cmd_ans() {
 
     case $subcmd in
         install)
-            log_step "📦 Target Prometheus 확인"
-            log_info "Target 서버: $TARGET_HOST"
-            PROMETHEUS_URL="http://$TARGET_HOST:9091"
-
-            if curl -s -o /dev/null -w "%{http_code}" "$PROMETHEUS_URL/-/healthy" | grep -q "200"; then
-                TARGET_PROMETHEUS_INSTALLED=true
-                save_state
-                log_success "Target Prometheus 접속 성공"
-            else
-                TARGET_PROMETHEUS_INSTALLED=false
-                save_state
-                log_warning "Target Prometheus 접속 실패"
-                log_info "먼저 실행하세요: tc pm start"
-            fi
+            log_step "📦 Ansible 레거시 안내"
+            log_warning "현재 권장 경로에서는 'cj ans install'이 필요하지 않습니다."
+            log_info "대신 다음을 사용하세요:"
+            echo "   tc connect -a <CJ_HOST> --check"
             echo ""
             log_info "다음 명령어 추천:"
-            if [ "$TARGET_PROMETHEUS_INSTALLED" = "true" ]; then
-                echo "   cj ans configure"
-            else
-                echo "   tc pm start"
-            fi
+            echo "   tc connect -a <CJ_HOST> --check"
             ;;
             
         configure)
-            log_step "🔧 Prometheus 설정 및 Grafana 연동"
-            
-            # kubeconfig 설정
-            export KUBECONFIG="$CJ_HOME/terraform/cloud-janitor-cluster-config"
-            
-            # Prometheus URL 확인
-            PROMETHEUS_URL="http://$TARGET_HOST:9091"
-            
-            log_info "Prometheus URL: $PROMETHEUS_URL"
-            
-            # Prometheus 접속 확인
-            if curl -s -o /dev/null -w "%{http_code}" "$PROMETHEUS_URL/-/healthy" | grep -q "200"; then
-                log_success "Target Prometheus 접속 성공"
-            else
-                log_warning "Target Prometheus 접속 실패"
-                log_info "먼저 실행하세요: tc pm start"
-                echo ""
-                log_info "다음 명령어 추천:"
-                echo "   tc pm start"
-                return 0
-            fi
-            
-            # Grafana에 Target Prometheus 데이터소스 추가
-            log_info "Grafana에 Target Prometheus 데이터소스 추가 중..."
-            
-            if [ -f "$CJ_HOME/ansible/playbooks/setup-target.yml" ]; then
-                uv run ansible-playbook "$ANSIBLE_DIR/playbooks/setup-target.yml" \
-                    -e "target_prometheus_url=$PROMETHEUS_URL"
-                
-                log_success "Prometheus 설정 및 Grafana 연동 완료"
-            else
-                log_warning "setup-target.yml를 찾을 수 없습니다."
-                log_info "수동으로 Grafana에서 Target Prometheus를 데이터소스로 추가하세요."
-                log_info "  URL: $PROMETHEUS_URL"
-            fi
+            log_step "🔧 Ansible 레거시 안내"
+            log_warning "현재 권장 경로에서는 'cj ans configure'가 필요하지 않습니다."
+            log_info "Target 등록/Prometheus datasource 갱신은 tc connect가 처리합니다."
+            log_info "필요한 경우에만 레거시 플레이북을 수동 실행하세요:"
+            echo "   uv run ansible-playbook $ANSIBLE_DIR/playbooks/setup-target.yml"
             echo ""
             log_info "다음 명령어 추천:"
-            echo "   cj start"
+            echo "   tc connect -a <CJ_HOST>"
             ;;
             
         shell)
@@ -1060,8 +1090,8 @@ cmd_ans() {
             log_error "알 수 없는 Ansible 명령어: $subcmd"
             echo ""
             echo "사용 가능한 명령어:"
-            echo "  cj ans install       Target Prometheus 접속 확인"
-            echo "  cj ans configure     Prometheus 설정 및 Grafana 연동"
+            echo "  cj ans install       (레거시) 안내 출력"
+            echo "  cj ans configure     (레거시) 안내 출력"
             echo "  cj ans shell          Ansible 쉘"
             exit 1
             ;;
@@ -1076,47 +1106,71 @@ cmd_status() {
     log_step "📊 Cloud Janitor 상태"
 
     check_cj_home
-    load_state
-
-    # .env 파일 로드
-    if [ -f "$CJ_HOME/.env" ]; then
-        source "$CJ_HOME/.env"
-    fi
-    TARGET_HOST="${TARGET_HOST:-localhost}"
 
     echo ""
-    echo "🎯 Target Cluster (외부 서버):"
-    echo "   Host: $TARGET_HOST"
-    
-    # Target Prometheus 확인
-    PROMETHEUS_URL="http://$TARGET_HOST:9091"
-    if curl -s -o /dev/null -w "%{http_code}" "$PROMETHEUS_URL/-/healthy" 2>/dev/null | grep -q "200"; then
-        echo -e "   Prometheus: ${GREEN}실행 중${NC} ($PROMETHEUS_URL)"
+    echo "🎯 Target Cluster 등록 상태:"
+    if curl --max-time 3 -s -o /dev/null -w "%{http_code}" "http://localhost:30800/health" 2>/dev/null | grep -q "200"; then
+        targets_json="$(curl -s http://localhost:30800/api/v1/targets 2>/dev/null || echo "[]")"
+        target_count="$(echo "$targets_json" | python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+    print(len(data) if isinstance(data,list) else 0)
+except Exception:
+    print(0)
+')"
+        echo "   등록된 TC 수: $target_count"
+        if [ "${target_count:-0}" -gt 0 ] 2>/dev/null; then
+            echo "   등록 대상:"
+            echo "$targets_json" | python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    data=[]
+if isinstance(data,list):
+    for item in data[:5]:
+        if isinstance(item,dict):
+            name=item.get("tc_name","unknown")
+            prom=item.get("prometheus_url","")
+            print(f"     - {name} ({prom})")
+'
+        fi
     else
-        echo -e "   Prometheus: ${RED}중지${NC} ($PROMETHEUS_URL)"
+        echo -e "   상태: ${YELLOW}CJ API 미연결${NC} (등록 대상 조회 불가)"
+        echo "   확인: tc connect --check -a <CJ_HOST>"
     fi
 
     echo ""
     echo "🎛️  Management Cluster:"
-    if [ "$MGMT_CLUSTER_CREATED" = "true" ]; then
-        echo -e "   상태: ${GREEN}생성됨${NC}"
-        
-        # kubeconfig 확인
-        if [ -f "$CJ_HOME/terraform/cloud-janitor-cluster-config" ]; then
-            export KUBECONFIG="$CJ_HOME/terraform/cloud-janitor-cluster-config"
+    if [ -f "$CJ_HOME/terraform/cloud-janitor-cluster-config" ]; then
+        export KUBECONFIG="$CJ_HOME/terraform/cloud-janitor-cluster-config"
+        if kubectl get namespace default >/dev/null 2>&1; then
+            echo -e "   상태: ${GREEN}생성됨${NC}"
             echo "   K8s Pods:"
-            kubectl get pods -A --no-headers | head -5 | while read ns rest; do
+            kubectl get pods -A --no-headers | head -5 | while read -r _ns rest; do
                 echo "     - $rest"
             done
+        else
+            echo -e "   상태: ${YELLOW}kubeconfig 있음, 연결 실패${NC}"
         fi
     else
         echo -e "   상태: ${YELLOW}생성 안됨${NC}"
     fi
-
+        
     echo ""
     echo "🐍 Cloud Janitor:"
-    if [ "$CLOUD_JANITOR_DEPLOYED" = "true" ]; then
-        echo -e "   상태: ${GREEN}배포됨${NC}"
+    if [ -f "$CJ_HOME/terraform/cloud-janitor-cluster-config" ]; then
+        export KUBECONFIG="$CJ_HOME/terraform/cloud-janitor-cluster-config"
+        if kubectl get deployment cloud-janitor -n default >/dev/null 2>&1; then
+            replicas=$(kubectl get deployment cloud-janitor -n default -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            replicas="${replicas:-0}"
+            if [ "$replicas" -gt 0 ] 2>/dev/null; then
+                echo -e "   상태: ${GREEN}실행 중${NC} (ready=$replicas)"
+            else
+                echo -e "   상태: ${YELLOW}배포됨(중지 상태)${NC}"
+            fi
+        else
+            echo -e "   상태: ${YELLOW}배포 안됨${NC}"
+        fi
     else
         echo -e "   상태: ${YELLOW}배포 안됨${NC}"
     fi
@@ -1124,7 +1178,6 @@ cmd_status() {
     echo ""
     echo "🔧 환경 변수:"
     echo "   CJ_HOME: $CJ_HOME"
-    echo "   TARGET_HOST: $TARGET_HOST"
     echo "   KUBECONFIG: ${KUBECONFIG:-설정 안됨}"
 }
 
@@ -1168,6 +1221,40 @@ cmd_logs() {
             exit 1
             ;;
     esac
+}
+
+# =============================================================================
+# 수동 스캔
+# =============================================================================
+
+cmd_scan() {
+    check_kubectl
+    check_cj_home
+
+    export KUBECONFIG="$CJ_HOME/terraform/cloud-janitor-cluster-config"
+
+    if ! kubectl get deployment cloud-janitor -n default >/dev/null 2>&1; then
+        log_error "cloud-janitor Deployment를 찾을 수 없습니다. 먼저 cj start를 실행하세요."
+        exit 1
+    fi
+
+    local pod
+    local retries=0
+    while [ $retries -lt 30 ]; do
+        pod=$(kubectl get pods -n default -l app=cloud-janitor -o go-template='{{range .items}}{{if and (eq .status.phase "Running") (not .metadata.deletionTimestamp)}}{{.metadata.name}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | tail -n1)
+        if [ -n "$pod" ]; then
+            break
+        fi
+        sleep 2
+        retries=$((retries + 1))
+    done
+    if [ -z "$pod" ]; then
+        log_error "실행 중인 cloud-janitor Pod가 없습니다. cj start 후 다시 시도하세요."
+        exit 1
+    fi
+
+    log_info "수동 스캔 실행: $pod"
+    kubectl exec -n default "$pod" -- python main.py scan
 }
 
 # =============================================================================
@@ -1231,6 +1318,62 @@ cmd_shell() {
 }
 
 # =============================================================================
+# Bootstrap (전체 자동화)
+# =============================================================================
+
+cmd_bootstrap() {
+    log_step "🚀 Cloud Janitor 전체 자동 설정"
+    echo ""
+    log_info "이 명령어는 다음을 자동으로 실행합니다:"
+    echo "   1. cj install   - CLI 설치"
+    echo "   2. cj init      - 프로젝트 초기화"
+    echo "   3. cj setup     - Kind 클러스터 생성 + Loki + MySQL + Grafana"
+    echo "   4. cj start     - Cloud Janitor 배포"
+    echo ""
+    
+    # 1. CLI 설치
+    log_step "📦 STEP 1/4: CLI 설치"
+    cmd_install
+    
+    # 2. 프로젝트 초기화
+    log_step "🔧 STEP 2/4: 프로젝트 초기화"
+    cmd_init
+    
+    # 3. 전체 설정
+    log_step "🏗️  STEP 3/4: 클러스터 설정"
+    cmd_setup
+    
+    # 4. 서비스 시작
+    log_step "🎯 STEP 4/4: 서비스 시작"
+    cmd_start
+    
+    log_step "✅ Cloud Janitor Bootstrap 완료!"
+    echo ""
+    echo "=========================================="
+    echo "  🎉 서비스 접속 정보"
+    echo "=========================================="
+    echo ""
+    echo "  📈 Grafana:      http://localhost:3000"
+    echo "     ID: admin"
+    echo "     PW: changeme (또는 .env에서 설정한 값)"
+    echo ""
+    echo "  📊 Loki API:     http://localhost:31000"
+    echo "  🐍 CJ API:       http://localhost:30800"
+    echo ""
+    echo "=========================================="
+    echo "  📝 다음 단계 (TC에서 실행)"
+    echo "=========================================="
+    echo ""
+    echo "  TC 서버에서 다음 명령어를 실행하세요:"
+    echo ""
+    echo "  tc bootstrap -a <CJ_IP>"
+    echo ""
+    echo "  예시 (로컬호스트):"
+    echo "  tc bootstrap -a localhost"
+    echo ""
+}
+
+# =============================================================================
 # 메인
 # =============================================================================
 
@@ -1260,6 +1403,7 @@ main() {
         tunnel)
             local subcmd=$1
             shift || true
+            parse_tunnel_options "$@"
             case $subcmd in
                 setup)
                     setup_ssh_tunnel
@@ -1268,13 +1412,16 @@ main() {
                     teardown_ssh_tunnel
                     ;;
                 status)
-                    if [ -f "$CJ_HOME/.ssh_tunnel_pid" ]; then
-                        SSH_TUNNEL_PID=$(cat "$CJ_HOME/.ssh_tunnel_pid")
-                        if ps -p "$SSH_TUNNEL_PID" > /dev/null 2>&1; then
-                            log_success "SSH 터널 실행 중 (PID: $SSH_TUNNEL_PID)"
-                        else
-                            log_warning "SSH 터널 PID 파일은 있지만 프로세스가 없습니다."
-                        fi
+                    if [ -f "$CJ_HOME/.env" ]; then
+                        # shellcheck disable=SC1090
+                        source "$CJ_HOME/.env"
+                    fi
+                    TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
+                    PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
+                    LOCAL_PROMETHEUS_PORT="${CLI_LOCAL_PORT:-${LOCAL_PROMETHEUS_PORT:-9091}}"
+                    SSH_TUNNEL_PID=$(pgrep -f "ssh.*localhost:${LOCAL_PROMETHEUS_PORT}:${TARGET_HOST}:${PROMETHEUS_PORT}" || true)
+                    if [ -n "$SSH_TUNNEL_PID" ]; then
+                        log_success "SSH 터널 실행 중 (PID: $SSH_TUNNEL_PID)"
                     else
                         log_warning "SSH 터널이 실행 중이지 않습니다."
                     fi
@@ -1283,9 +1430,9 @@ main() {
                     log_error "알 수 없는 터널 명령어: $subcmd"
                     echo ""
                     echo "사용 가능한 명령어:"
-                    echo "  cj tunnel setup    SSH 터널 생성"
-                    echo "  cj tunnel stop     SSH 터널 종료"
-                    echo "  cj tunnel status  SSH 터널 상태 확인"
+                    echo "  cj tunnel setup [--host H --user U --port P --key K --remote-port RP --local-port LP]"
+                    echo "  cj tunnel stop  [--host H --remote-port RP --local-port LP]"
+                    echo "  cj tunnel status [--host H --remote-port RP --local-port LP]"
                     exit 1
                     ;;
             esac
@@ -1302,6 +1449,9 @@ main() {
         logs)
             cmd_logs "$@"
             ;;
+        scan)
+            cmd_scan
+            ;;
         grafana)
             cmd_grafana
             ;;
@@ -1313,6 +1463,9 @@ main() {
             ;;
         shell)
             cmd_shell
+            ;;
+        bootstrap)
+            cmd_bootstrap
             ;;
         version|--version|-v)
             show_version

@@ -23,6 +23,24 @@ resource "helm_release" "loki_stack" {
     name  = "loki.image.tag"
     value = "2.9.10"
   }
+  set {
+    name  = "loki.service.type"
+    value = "NodePort"
+  }
+  set {
+    name  = "loki.service.nodePort"
+    value = "31000"
+  }
+
+  # Enable CJ-side Promtail for cloud-janitor/cloud-janitor-scanner pod logs
+  set {
+    name  = "promtail.enabled"
+    value = "true"
+  }
+  set {
+    name  = "promtail.serviceMonitor.enabled"
+    value = "false"
+  }
 
   wait            = true
   cleanup_on_fail = true

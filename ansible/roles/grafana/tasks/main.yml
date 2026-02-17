@@ -68,25 +68,13 @@
             targetPort: 3000
             nodePort: 30080
 
-- name: Wait for Grafana pod to be ready
+- name: Wait for Grafana deployment to be available
   kubernetes.core.k8s_info:
-    kind: Pod
+    kind: Deployment
     namespace: monitoring
-    label_selectors:
-      - app = grafana
-  register: grafana_pod
-  until: grafana_pod.resources[0].status.phase == "Running"
-  retries: 30
-  delay: 10
-
-# 1) Grafana Health 대기
-- name: Wait for Grafana to be ready
-  ansible.builtin.uri:
-    url: "{{ grafana_url }}/api/health"
-    method: GET
-    status_code: 200
-  register: _grafana_health
-  until: _grafana_health.status == 200
+    name: grafana
+  register: grafana_deploy
+  until: (grafana_deploy.resources | length) > 0 and (grafana_deploy.resources[0].status.availableReplicas | default(0)) | int > 0
   retries: 30
   delay: 10
 
@@ -101,6 +89,7 @@
     force_basic_auth: true
     status_code: [200, 404]
   register: _prom_existing
+  when: (prometheus_internal_url | default('')) | length > 0
 
 - name: Create Prometheus datasource
   ansible.builtin.uri:
@@ -111,13 +100,16 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: prometheus-main
       name: Prometheus
       type: prometheus
       url: "{{ prometheus_internal_url }}"
       access: proxy
       isDefault: true
     status_code: [200]
-  when: _prom_existing.status == 404
+  when:
+    - (prometheus_internal_url | default('')) | length > 0
+    - _prom_existing.status == 404
 
 - name: Update Prometheus datasource
   ansible.builtin.uri:
@@ -128,13 +120,16 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: prometheus-main
       name: Prometheus
       type: prometheus
       url: "{{ prometheus_internal_url }}"
       access: proxy
       isDefault: true
     status_code: [200, 403]
-  when: _prom_existing.status == 200
+  when:
+    - (prometheus_internal_url | default('')) | length > 0
+    - _prom_existing.status == 200
 
 # ── Datasource: Loki ────────────────────────────────────────────────────────
 
@@ -157,6 +152,7 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: loki-main
       name: Loki
       type: loki
       url: "{{ loki_internal_url }}"
@@ -178,6 +174,7 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: loki-main
       name: Loki
       type: loki
       url: "{{ loki_internal_url }}"
@@ -189,6 +186,70 @@
         httpMethod: "POST"
     status_code: [200, 403]
   when: _loki_existing.status == 200
+
+# ── Datasource: MySQL (latest snapshot table) ───────────────────────────────
+
+- name: Get existing MySQL datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/name/MySQL"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: _mysql_existing
+
+- name: Create MySQL datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      uid: mysql-main
+      name: MySQL
+      type: mysql
+      url: "{{ env_vars['DB_HOST'] | default('mysql.mysql.svc.cluster.local') }}:3306"
+      database: "{{ env_vars['DB_NAME'] | default('janitor_db') }}"
+      user: "{{ env_vars['DB_USER'] | default('root') }}"
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxOpenConns: 20
+        maxIdleConns: 20
+        connMaxLifetime: 14400
+      secureJsonData:
+        password: "{{ env_vars['DB_PASSWORD'] | default('rootpassword') }}"
+    status_code: [200]
+  when: _mysql_existing.status == 404
+
+- name: Update MySQL datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/{{ _mysql_existing.json.id }}"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      uid: mysql-main
+      name: MySQL
+      type: mysql
+      url: "{{ env_vars['DB_HOST'] | default('mysql.mysql.svc.cluster.local') }}:3306"
+      database: "{{ env_vars['DB_NAME'] | default('janitor_db') }}"
+      user: "{{ env_vars['DB_USER'] | default('root') }}"
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxOpenConns: 20
+        maxIdleConns: 20
+        connMaxLifetime: 14400
+      secureJsonData:
+        password: "{{ env_vars['DB_PASSWORD'] | default('rootpassword') }}"
+    status_code: [200, 403]
+  when: _mysql_existing.status == 200
 
 # ── Dashboard Import ────────────────────────────────────────────────────────
 

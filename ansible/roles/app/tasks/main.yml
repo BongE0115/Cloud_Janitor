@@ -30,6 +30,20 @@
   retries: 30
   delay: 5
 
+- name: Create MySQL init script ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: mysql-init-scripts
+        namespace: mysql
+      data:
+        mysql-init.sh: "{{ lookup('file', role_path + '/files/mysql-init.sh') }}"
+        mysql-init.sql: "{{ lookup('file', role_path + '/files/mysql-init.sql') }}"
+  run_once: true
+
 - name: Create deletion logs table in MySQL
   kubernetes.core.k8s:
     state: present
@@ -43,6 +57,10 @@
         template:
           spec:
             restartPolicy: OnFailure
+            volumes:
+              - name: mysql-init-scripts
+                configMap:
+                  name: mysql-init-scripts
             containers:
               - name: mysql-init
                 image: mysql:8.0
@@ -56,38 +74,10 @@
                         key: mysql-root-password
                   - name: MYSQL_DATABASE
                     value: "janitor_db"
-                command:
-                  - bash
-                  - -c
-                  - |
-                    # Wait for MySQL to be ready
-                    until mysql -h$MYSQL_HOST -uroot -p$MYSQL_ROOT_PASSWORD -e "SELECT 1" >/dev/null 2>&1; do
-                      echo "Waiting for MySQL..."
-                      sleep 3
-                    done
-
-                    # Create deletion logs table
-                    mysql -h$MYSQL_HOST -uroot -p$MYSQL_ROOT_PASSWORD $MYSQL_DATABASE <<'EOF'
-                    CREATE TABLE IF NOT EXISTS deletion_logs (
-                      id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                      pod_name VARCHAR(255) NOT NULL,
-                      container_name VARCHAR(255),
-                      namespace VARCHAR(100),
-                      pod_ip VARCHAR(50),
-                      cpu_usage DECIMAL(10, 4),
-                      memory_usage DECIMAL(20, 2),
-                      network_receive_rate DECIMAL(20, 2),
-                      network_transmit_rate DECIMAL(20, 2),
-                      deletion_reason TEXT,
-                      detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                      deleted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                      INDEX idx_pod_name (pod_name),
-                      INDEX idx_deleted_at (deleted_at),
-                      INDEX idx_namespace (namespace)
-                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-                    EOF
-
-                    echo "MySQL initialization completed successfully"
+                command: ["/bin/bash", "/opt/mysql-init/mysql-init.sh"]
+                volumeMounts:
+                  - name: mysql-init-scripts
+                    mountPath: /opt/mysql-init
   run_once: true
 
 # -----------------------------------------------------------------------------
@@ -110,7 +100,7 @@
           # Prometheus Connection (Target Cluster)
           # cj가 TC의 Prometheus API를 직접 폴링
           prometheus:
-            url: "http://{{ TARGET_PROMETHEUS_URL | default('localhost:9091') }}"
+            url: "{{ prometheus_internal_url | default('') }}"
             timeout: 30
           
           # Zombie Detection Criteria
@@ -144,6 +134,25 @@
             file: "/var/log/cloud-janitor/janitor.log"
 
 # -----------------------------------------------------------------------------
+# 3.5. Cloud Janitor Runtime Code ConfigMap
+# 이미지 재빌드 없이 로컬 파이썬 코드를 주입하기 위한 설정
+# -----------------------------------------------------------------------------
+- name: Create Cloud Janitor Runtime Code ConfigMap
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: cloud-janitor-runtime-code
+        namespace: default
+      data:
+        main.py: "{{ lookup('file', role_path + '/../../../main.py') }}"
+        database.py: "{{ lookup('file', role_path + '/../../../py_Logic/database.py') }}"
+        janitor_logic.py: "{{ lookup('file', role_path + '/../../../py_Logic/janitor_logic.py') }}"
+        metrics.py: "{{ lookup('file', role_path + '/../../../py_Logic/metrics.py') }}"
+
+# -----------------------------------------------------------------------------
 # 4. Cloud Janitor Secret 생성 (MySQL 비밀번호)
 # -----------------------------------------------------------------------------
 - name: Create Cloud Janitor Secret
@@ -161,6 +170,9 @@
         db-user: "{{ env_vars['DB_USER'] | default('root') }}"
         db-password: "{{ env_vars['DB_PASSWORD'] | default('rootpassword') }}"
         db-name: "{{ env_vars['DB_NAME'] | default('janitor_db') }}"
+        grafana-url: "{{ env_vars['GRAFANA_URL'] | default('http://grafana.monitoring.svc.cluster.local:3000') }}"
+        grafana-user: "{{ env_vars['GRAFANA_USER'] | default('admin') }}"
+        grafana-password: "{{ env_vars['GRAFANA_PASSWORD'] | default('admin') }}"
 
 # -----------------------------------------------------------------------------
 # 5. Cloud Janitor RBAC (권한 설정)
@@ -185,8 +197,11 @@
         name: cloud-janitor
       rules:
         - apiGroups: [""]
-          resources: ["pods", "namespaces"]
-          verbs: ["get", "list", "watch", "delete"]
+          resources: ["pods", "namespaces", "secrets", "configmaps", "services", "endpoints"]
+          verbs: ["get", "list", "watch", "delete", "create", "update"]
+        - apiGroups: ["batch"]
+          resources: ["cronjobs", "jobs"]
+          verbs: ["get", "list", "watch", "create", "update", "delete"]
 
 - name: Create Cloud Janitor ClusterRoleBinding
   kubernetes.core.k8s:
@@ -231,31 +246,96 @@
           spec:
             serviceAccountName: cloud-janitor
             
-            # Docker Socket Mount (Target Docker API 접근용)
+            # Volumes (Docker socket not supported in Kind)
             volumes:
-              - name: docker-socket
-                hostPath:
-                  path: /var/run/docker.sock
-                  type: Socket
               - name: log-dir
                 emptyDir: {}
+              - name: runtime-code
+                configMap:
+                  name: cloud-janitor-runtime-code
+            
+            # InitContainer: Run initial scan on pod startup
+            initContainers:
+              - name: initial-scan
+                image: cloud-janitor:latest
+                imagePullPolicy: IfNotPresent
+                env:
+                  - name: LOKI_URL
+                    value: "http://loki.monitoring.svc.cluster.local:3100"
+                  - name: DB_HOST
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-host
+                  - name: DB_USER
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-user
+                  - name: DB_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-password
+                  - name: DB_NAME
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: db-name
+                  - name: LIMIT_CPU_M
+                    value: "{{ env_vars['LIMIT_CPU_M'] | default('10.0') }}"
+                  - name: TIME_WINDOW_CPU
+                    value: "{{ env_vars['TIME_WINDOW_CPU'] | default('2m') }}"
+                  - name: LIMIT_NET_B
+                    value: "{{ env_vars['LIMIT_NET_B'] | default('100.0') }}"
+                  - name: TIME_WINDOW_NET
+                    value: "{{ env_vars['TIME_WINDOW_NET'] | default('2m') }}"
+                  - name: DRY_RUN
+                    value: "{{ env_vars['DRY_RUN'] | default('True') }}"
+                  - name: COST_PER_CORE_HOUR
+                    value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
+                  - name: DEFAULT_CPU_REQ
+                    value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                  - name: WHITE_LIST_NS
+                    value: "kube-system,prometheus,local-path-storage,monitoring"
+                  - name: TARGET_NAMESPACES
+                    value: "default,zombie-zone"
+                command:
+                  - python
+                  - main.py
+                  - scan
+                volumeMounts:
+                  - name: log-dir
+                    mountPath: /var/log/cloud-janitor
+                  - name: runtime-code
+                    mountPath: /app/main.py
+                    subPath: main.py
+                  - name: runtime-code
+                    mountPath: /app/py_Logic/database.py
+                    subPath: database.py
+                  - name: runtime-code
+                    mountPath: /app/py_Logic/janitor_logic.py
+                    subPath: janitor_logic.py
+                  - name: runtime-code
+                    mountPath: /app/py_Logic/metrics.py
+                    subPath: metrics.py
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "128Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "512Mi"
             
             containers:
               - name: cloud-janitor
-                image: cloud-janitor:latest  # TODO: 빌드한 이미지로 변경
+                image: cloud-janitor:latest
                 imagePullPolicy: IfNotPresent
                 
                 env:
-                  # Target Prometheus URL
-                  - name: TARGET_PROMETHEUS_URL
-                    valueFrom:
-                      configMapKeyRef:
-                        name: cloud-janitor-config
-                        key: config.yaml
-                  # OR:
-                  - name: PROMETHEUS_URL
-                    value: "{{ env_vars['TARGET_PROMETHEUS_URL'] | default('http://localhost:9091') }}"
-                  
+                  - name: LOKI_URL
+                    value: "http://loki.monitoring.svc.cluster.local:3100"
+                
                   # Database Configuration
                   - name: DB_HOST
                     valueFrom:
@@ -277,7 +357,23 @@
                       secretKeyRef:
                         name: cloud-janitor-secret
                         key: db-name
-                  
+
+                  - name: GRAFANA_URL
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: grafana-url
+                  - name: GRAFANA_USER
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: grafana-user
+                  - name: GRAFANA_PASSWORD
+                    valueFrom:
+                      secretKeyRef:
+                        name: cloud-janitor-secret
+                        key: grafana-password
+                
                   # Detection Criteria
                   - name: LIMIT_CPU_M
                     value: "{{ env_vars['LIMIT_CPU_M'] | default('10.0') }}"
@@ -287,7 +383,7 @@
                     value: "{{ env_vars['LIMIT_NET_B'] | default('100.0') }}"
                   - name: TIME_WINDOW_NET
                     value: "{{ env_vars['TIME_WINDOW_NET'] | default('2m') }}"
-                  
+                
                   # Deletion Control
                   - name: DRY_RUN
                     value: "{{ env_vars['DRY_RUN'] | default('True') }}"
@@ -295,6 +391,9 @@
                     value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
                   - name: DEFAULT_CPU_REQ
                     value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                  # Run mode for initial scan
+                  - name: RUN_MODE
+                    value: "serve"
                 
                 ports:
                   - name: http
@@ -304,6 +403,18 @@
                 volumeMounts:
                   - name: log-dir
                     mountPath: /var/log/cloud-janitor
+                  - name: runtime-code
+                    mountPath: /app/main.py
+                    subPath: main.py
+                  - name: runtime-code
+                    mountPath: /app/py_Logic/database.py
+                    subPath: database.py
+                  - name: runtime-code
+                    mountPath: /app/py_Logic/janitor_logic.py
+                    subPath: janitor_logic.py
+                  - name: runtime-code
+                    mountPath: /app/py_Logic/metrics.py
+                    subPath: metrics.py
                 
                 resources:
                   requests:
@@ -365,7 +476,7 @@
         name: cloud-janitor-scanner
         namespace: default
       spec:
-        schedule: "*/5 * * * *"  # 매 5분마다 실행
+        schedule: "*/1 * * * *"  # 매 1분마다 실행
         jobTemplate:
           spec:
             backoffLimit: 3
@@ -374,6 +485,10 @@
               spec:
                 serviceAccountName: cloud-janitor
                 restartPolicy: OnFailure
+                volumes:
+                  - name: runtime-code
+                    configMap:
+                      name: cloud-janitor-runtime-code
                 containers:
                   - name: scanner
                     image: cloud-janitor:latest
@@ -381,8 +496,8 @@
                     
                     env:
                       # Copy same environment variables from deployment
-                      - name: PROMETHEUS_URL
-                        value: "{{ env_vars['TARGET_PROMETHEUS_URL'] | default('http://localhost:9091') }}"
+                      - name: LOKI_URL
+                        value: "http://loki.monitoring.svc.cluster.local:3100"
                       - name: DB_HOST
                         valueFrom:
                           secretKeyRef:
@@ -417,12 +532,28 @@
                         value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
                       - name: DEFAULT_CPU_REQ
                         value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                      - name: WHITE_LIST_NS
+                        value: "kube-system,prometheus,local-path-storage,monitoring"
+                      - name: TARGET_NAMESPACES
+                        value: "default,zombie-zone"
                     
                     command:
                       - python
-                      - -m
-                      - cloud_janitor
+                      - main.py
                       - scan
+                    volumeMounts:
+                      - name: runtime-code
+                        mountPath: /app/main.py
+                        subPath: main.py
+                      - name: runtime-code
+                        mountPath: /app/py_Logic/database.py
+                        subPath: database.py
+                      - name: runtime-code
+                        mountPath: /app/py_Logic/janitor_logic.py
+                        subPath: janitor_logic.py
+                      - name: runtime-code
+                        mountPath: /app/py_Logic/metrics.py
+                        subPath: metrics.py
                     
                     resources:
                       requests:

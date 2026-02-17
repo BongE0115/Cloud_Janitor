@@ -4,6 +4,30 @@ KT Cloud Tech Up 2기 클라우드 인프라 과정 기본 프로젝트 2조(내
 
 **Zombie Pod 감지 및 자동 정리 시스템**
 
+## 아키텍처 R&R
+
+### TC (Target Cluster - 적용 시스템)
+- **Prometheus**: 컨테이너 메트릭 수집
+  - cAdvisor를 통해 Docker 컨테이너 메트릭(CPU, 메모리, 네트워크) 수집
+  - Cloud Janitor가 PromQL 쿼리로 폴링하여 좀비 파드 감지
+- **Promtail**: TC 컨테이너 로그 수집
+  - TC의 모든 컨테이너 로그를 CJ의 Loki로 전송
+  - 로그 라벨: `{job="tc-docker"}`
+
+### CJ (Cloud Janitor - 모니터링 시스템)
+- **Loki**: 중앙 로그 저장소
+  - TC Promtail 로그 수신 (TC 컨테이너 로그)
+  - CJ Promtail 로그 수신 (Cloud Janitor/Scanner 활동 로그)
+- **Promtail (CJ)**: CJ Pod 로그 수집
+  - `cloud-janitor`, `cloud-janitor-scanner` 로그를 Loki로 전송
+- **Grafana**: 데이터 시각화
+  - Loki 로그 기반 대시보드 (좀비 파드 감지 기록)
+  - Prometheus 메트릭 기반 대시보드 (네트워크 트래픽 등)
+- **Cloud Janitor**: 좀비 파드 감지 및 삭제 서비스
+  - TC Prometheus 폴링 → 좀비 파드 감지 → 삭제 → 로그 기록
+  - 감지 결과를 로그로 남겨 Loki에 저장
+- **MySQL**: 좀비 파드 삭제 기록 DB
+
 ## Team Members
 - 신봉근 : 팀장, 인프라
 - 문경호 : 부팀장, 인프라
@@ -15,11 +39,11 @@ KT Cloud Tech Up 2기 클라우드 인프라 과정 기본 프로젝트 2조(내
 1. [🏗️ Project Architecture](#🏗️-project-architecture)
 2. [🛠 Tech Stack](#🛠-tech-stack)
 3. [🚀 Quick Start](#🚀-quick-start)
-4. [🛠️ cj CLI 명령어 가이드](#🛠️-cj-cli-명령어-가이드)
+4. [📊 운영 확인 가이드](#📊-운영-확인-가이드)
 
 ## 🏗️ Project Architecture
 
-Cloud Janitor는 **TC(Target Cluster, 적용 시스템)**와 **cj(Cloud Janitor, 모니터링 시스템)**로 분리된 아키텍처입니다.
+Cloud Janitor는 **TC(Target Cluster, 적용 시스템)**와 **CJ(Cloud Janitor, 모니터링 시스템)**로 분리된 아키텍처입니다.
 
 ```mermaid
 flowchart TB
@@ -34,9 +58,9 @@ flowchart TB
         direction TB
         style TC_Cluster fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#000000
 
-        TC_Prometheus["📊 Prometheus<br/>(딱 하나만!)"]
-        TC_Apps["📦 기존 프로세스들<br/>(더미 앱, 좀비 포함)"]
-        TC_Client["📤 TC Client<br/>[target-cluster 폴더]<br/>연결 요청"]:::highlight
+        TC_Prometheus["📊 Prometheus<br/>메트릭 수집"]
+        TC_Promtail["📤 Promtail<br/>로그 전송"]
+        TC_Apps["📦 컨테이너들<br/>(더미 앱, 좀비 포함)"]
     end
 
     %% cj (모니터링 시스템)
@@ -44,34 +68,54 @@ flowchart TB
         direction TB
         style CJ_Cluster fill:#e3f2fd,stroke:#1976d2,stroke-width:2px,color:#000000
 
-        CJ_Janitor["🐍 Cloud Janitor<br/>[Deployment]<br/>좀비 Pod 감지"]
-        CJ_MySQL["🗄️ MySQL<br/>[Deployment]<br/>삭제 기록 저장<br/>cj가 직접 관리"]
+        CJ_Janitor["🐍 Cloud Janitor<br/>[Deployment]<br/>좀비 Pod 감지<br/>로그 기록"]:::highlight
+        CJ_Promtail["📤 Promtail (CJ)<br/>[Helm]<br/>CJ Pod 로그 수집"]
+        CJ_Loki["📝 Loki<br/>[Helm]<br/>중앙 로그 저장소<br/>{app=~'cloud-janitor|cloud-janitor-scanner'}"]
+        CJ_MySQL["🗄️ MySQL<br/>[Deployment]<br/>삭제 기록 저장"]
         CJ_Grafana["📈 Grafana<br/>[Deployment]<br/>시각화 대시보드"]
-        CJ_Loki["📝 Loki<br/>[Helm]<br/>중앙 로그 저장소"]
     end
 
-    %% 데이터 흐름
-    TC_Apps -->|Metrics| TC_Prometheus
+    %% 데이터 흐름 - TC 내부
+    TC_Apps -->|CPU/메모리/네트워크| TC_Prometheus
+    TC_Apps -->|컨테이너 로그| TC_Promtail
 
-    TC_Client -->|연결 요청| CJ_Janitor
-    CJ_Janitor -.->|1. PromQL 폴링| TC_Prometheus
-    CJ_Janitor -.->|2. 좀비 감지| TC_Apps
-    CJ_Janitor -->|3. 삭제 기록| CJ_MySQL
+    %% TC → cj 연결
+    TC_Promtail -->|로그 전송| CJ_Loki
+    CJ_Janitor -.->|PromQL 폴링<br/>(CPU/네트워크)| TC_Prometheus
+    CJ_Janitor -.->|Docker API<br/>(좀비 삭제)| TC_Apps
 
-    TC_Prometheus -.->|4. 메트릭| CJ_Grafana
+    %% cj 내부 데이터 흐름
+    CJ_Janitor -->|Pod stdout 로그| CJ_Promtail
+    CJ_Promtail -->|로그 전송| CJ_Loki
+    CJ_Janitor -->|삭제 기록| CJ_MySQL
+
+    %% 데이터 소스
+    CJ_Loki -->|Cloud Janitor 로그<br/>(좀비 감지 기록)| CJ_Grafana
+    TC_Prometheus -.->|메트릭<br/>(네트워크 등)| CJ_Grafana
 ```
 
 ### 핵심 설계 원칙
 
-1. **TC (적용 시스템)**: Prometheus만 존재, 기존 프로세스들 유지
-2. **cj (모니터링 시스템)**: MySQL 있음, 좀비 감지 및 삭제 로그 관리
-3. **연결 요청 (TC → cj)**: TC가 능동적으로 cj에 연결 요청 전송 (target-cluster 폴더)
-4. **모니터링 (cj → TC)**: cj가 TC의 Prometheus API를 폴링하고 Docker API 호출
-5. **데이터 소스 분리**: cj MySQL에 삭제 기록, TC Prometheus에 메트릭
+1. **TC (적용 시스템)**: Prometheus + Promtail (메트릭/로그 수집)
+2. **CJ (모니터링 시스템)**: Promtail(CJ 로그 수집), Loki (로그 저장), Grafana (시각화), Cloud Janitor (감지/삭제), MySQL (기록 저장)
+3. **데이터 흐름**: 
+   - TC Prometheus → Cloud Janitor 폴링 → 좀비 감지
+   - TC Promtail → CJ Loki (TC 컨테이너 로그)
+   - Cloud Janitor/Scanner 로그 → CJ Promtail → CJ Loki
+   - Cloud Janitor 로그 → Grafana 대시보드 (좀비 감지/삭제 기록)
+   - TC Prometheus → Grafana 대시보드 (네트워크 트래픽 등)
+4. **연결 방식**: TC Promtail과 CJ Promtail이 각각 Loki로 로그를 전송, Cloud Janitor가 TC Prometheus를 폴링
 
 ### 연결 방식
 
 TC에서 Prometheus와 앱을 실행하고, cj에서 설정/시작하여 연결합니다.
+
+### Janitor 로그 소스 구분
+
+| app 라벨 | 실행 주체 | 용도 |
+|----------|-----------|------|
+| `cloud-janitor` | Deployment (API 서버) | 등록 API, 수동 스캔 실행 로그, 서비스 상태 로그 |
+| `cloud-janitor-scanner` | CronJob (주기 스캔) | 자동 주기 스캔 결과 로그 (`SCAN_CYCLE_*`, `SCAN_CONTAINER`) |
 
 ## 🛠 Tech Stack
 
@@ -103,12 +147,22 @@ TC에서 Prometheus와 앱을 실행하고, cj에서 설정/시작하여 연결�
 - Helm
 - **target-cluster 앱과 Prometheus는 별도 실행**
 
+### TC CLI 위치
+
+- TC CLI 본체: `target-cluster/tc`
+- 루트 `tc`는 `target-cluster/tc`를 호출하는 래퍼입니다.
+- 설치는 기존처럼 `./tc install` 또는 `target-cluster/tc install` 둘 다 가능합니다.
+
 ### 실행 프로세스
 
 ```bash
-# 1. CLI 설치
+# 1. CLI 설치 (선택사항, 이미 설치되어 있으면 생략)
 ./cj install
 ./tc install
+
+# ========================================
+# 🛠️ 수동 실행
+# ========================================
 
 # 2. 초기화
 cj init
@@ -119,225 +173,97 @@ tc start
 # 4. TC Prometheus + Promtail 시작
 tc pm start
 
-# 5. cj 설정 및 시작
+# 5. cj 설정 (Grafana/Loki/MySQL 준비)
 cj setup
+
+# 6. cj 서비스 시작
 cj start
 
-# 6. TC → cj 연결
+# 7. TC → cj 연결 요청
 tc connect -a localhost
-```
-Prometheus가 먼저 실행되어 있어야 `cj setup`이 정상 동작합니다.  
-`Prometheus 헬스 체크 중...`에서 헬스 체크 실패 라고 뜨는건 정상적인 경우입니다.  
 
-## 🛠️ cj CLI 명령어 가이드
-
-Cloud Janitor CLI(`cj`)는 tc에 연결하여 모니터링하는 프로젝트를 쉽게 관리할 수 있는 도구입니다.
-
-### 설치
-
-```bash
-# cj CLI 시스템 PATH에 등록
-./cj install
-
-# 설치 과정:
-# 1. 쉘 타입 자동 감지 (zsh, bash)
-# 2. .zshrc 또는 .bashrc에 CJ_HOME과 PATH 추가
-# 3. .zprofile에도 CJ_HOME과 PATH 추가 (login shell용)
-# 4. 시스템 PATH에 심볼릭 링크 생성 시도
+# (선택) TC에서 화이트리스트 직접 설정
+#  - base(고정): target-cluster/.env 의 CJ_CONTAINER_WHITELIST
+#    (whitelist 명령으로 수정되지 않음)
+#  - custom(사용자): tc whitelist set/add/remove/pick
+#    (target-cluster/.whitelist.custom 에 저장)
+#  - 전송 방식: tc connect 시 base+custom을 합쳐 labels.container_whitelist로 동봉 전송
+#  - 실시간 반영: tc whitelist ... -a localhost -n tc-target
 ```
 
-### 프로젝트 관리
+### 외부 TC 서버 시나리오
+
+#### CJ 서버에서 TC Prometheus로 SSH 터널 생성 (`-L`)
 
 ```bash
-cj init              # 프로젝트 초기화
-cj setup             # 전체 설정 (Target Prometheus 확인 + Mgmt Cluster 생성)
-cj start             # 서비스 시작
-cj stop              # 서비스 중지
-cj status            # 전체 시스템 상태 확인
+# 1) CJ 서버에서 TC Prometheus(원격 9091)로 SSH 터널 생성
+#    - 로컬 9091 -> 원격 9091
+cj tunnel setup \
+  --host <TC_PUBLIC_IP_OR_HOST> \
+  --user <SSH_USER> \
+  --port 22 \
+  --key ~/.ssh/<KEY_FILE> \
+  --remote-port 9091 \
+  --local-port 9091
+
+# 2) 터널 상태 확인
+cj tunnel status --host <TC_PUBLIC_IP_OR_HOST> --remote-port 9091 --local-port 9091
+
+# 3) TC 등록 (CJ API 기준)
+#    - tc는 TC 서버에서 실행하거나, TC 환경 접근 가능한 위치에서 실행
+tc connect -a <CJ_PUBLIC_IP_OR_HOST> --prom-url http://localhost:9091 -n tc-target
+
+# 4) 필요 시 수동 스캔
+cj scan
+
+# 5) 종료 시 터널 해제
+cj tunnel stop --host <TC_PUBLIC_IP_OR_HOST> --remote-port 9091 --local-port 9091
 ```
 
-### Terraform (Management Cluster)
+### 외부 TC 서버 시나리오 (SSH 역터널: TC -> CJ, `-R`)
+
+TC에서 CJ로 SSH 접속 가능한 환경(NAT/방화벽으로 CJ -> TC 인바운드가 어려운 경우)에 권장합니다.
 
 ```bash
-cj tf init           # Terraform 초기화
-cj tf plan           # Terraform 계획 확인
-cj tf apply          # Terraform 적용 (클러스터 생성)
-cj tf destroy        # Terraform 삭제 (클러스터 삭제)
-cj tf output         # Terraform 출력값 확인
-cj tf shell          # Terraform 쉘 실행
+# 1) TC 서버에서 CJ로 역터널 생성
+#    - CJ의 19091 포트를 통해 TC localhost:9091(Prometheus)에 접근 가능
+tc tunnel setup \
+  --cj-host <CJ_PUBLIC_IP_OR_HOST> \
+  --cj-user <CJ_SSH_USER> \
+  --cj-port 22 \
+  --key ~/.ssh/<TC_PRIVATE_KEY> \
+  --remote-port 19091 \
+  --local-port 9091
+
+# 2) 상태 확인
+tc tunnel status --cj-host <CJ_PUBLIC_IP_OR_HOST> --cj-user <CJ_SSH_USER> --remote-port 19091 --local-port 9091
+
+# 3) CJ에 TC 등록 (Prometheus URL은 CJ에서 열리는 포트 기준)
+tc connect -a <CJ_PUBLIC_IP_OR_HOST> --prom-url http://localhost:19091 -n tc-target
+
+# 4) 필요 시 수동 스캔
+cj scan
+
+# 5) 종료 시 역터널 해제
+tc tunnel stop --cj-host <CJ_PUBLIC_IP_OR_HOST> --cj-user <CJ_SSH_USER> --remote-port 19091 --local-port 9091
 ```
 
-### Ansible (Target Prometheus 확인)
+## 📊 운영 확인 가이드
+
+### 빠른 점검 순서
 
 ```bash
-cj ans install       # Target Prometheus 접속 확인
-cj ans configure     # Prometheus 설정 및 Grafana 연동
-cj ans shell         # Ansible playbook 실행 쉘
-```
-
-### 상태 및 로그
-
-```bash
-cj status            # 전체 상태 확인
-cj logs janitor      # Cloud Janitor 로그
-cj logs mysql        # MySQL 로그
-cj logs grafana      # Grafana 로그
-cj logs loki         # Loki 로그
-```
-
-### 접속
-
-```bash
-cj grafana           # Grafana 접속 (브라우저 열기)
-```
-
-### 기타
-
-```bash
-cj env               # .env 파일 편집
-cj kubeconfig        # kubeconfig 경로 출력
-cj shell             # Cloud Janitor 프로젝트 디렉토리로 이동
-cj version           # 버전 정보
-cj help              # 도움말
-```
-
-### 환경 변수
-
-- `CJ_HOME`: Cloud Janitor 프로젝트 경로 (기본값: cj 스크립트 위치)
-- `TARGET_HOST`: Target 서버 주소 (기본값: localhost, .env 파일에서 설정)
-
-```bash
-# 예: 다른 디렉토리에서 cj 사용
-export CJ_HOME="/home/user/Cloud_Janitor"
-export TARGET_HOST="192.168.1.100"
-cd /any/where
+# 1) TC/CJ 상태
+tc status
 cj status
-```
 
-## 📊 Monitoring & Visualization
+# 2) TC -> CJ 연결 상태 점검
+tc connect --check -a localhost
 
-### Grafana 대시보드
+# 3) 수동 1회 스캔
+cj scan
 
-Cloud Janitor는 다음 3개의 주요 대시보드를 제공합니다:
-
-1. **Target Cluster Metrics**
-   - 컨테이너 CPU/메모리/네트워크 사용량
-   - 리소스 사용 현황
-   - **Monitoring Service**와 통신
-
-2. **Cloud Janitor Deletion Logs**
-   - 삭제된 파드 이력
-   - 삭제 사유 분석
-   - 비용 절감 효과
-
-3. **System Health**
-   - Cloud Janitor Pod 상태
-   - MySQL 연결 상태
-   - Prometheus 연결 상태
-
-### PromQL 쿼리 예시
-
-Cloud Janitor에서 사용하는 PromQL 쿼리:
-
-```promql
-# CPU 사용량이 낮은 컨테이너 감지 (2분 평균 10m 미만)
-rate(container_cpu_usage_seconds_total{name!=""}[2m]) < 0.01
-
-# 네트워크 수신량이 낮은 컨테이너 감지 (2분 평균 100바이트 미만)
-rate(container_network_receive_bytes_total{name!=""}[2m]) < 100
-
-# 메모리 사용량이 낮은 컨테이너 감지
-container_memory_usage_bytes{name!=""} < 1048576  # 1MB 미만
-
-# 특정 라벨이 있는 좀비 컨테이너 감지
-rate(container_cpu_usage_seconds_total{label_zombie_type="idle"}[2m]) < 0.01
-```
-
-### 데이터 소스 설정
-
-Grafana에 Target Prometheus 데이터소스를 추가하려면:
-
-1. Grafana 접속 (http://localhost:3000)
-2. Configuration → Data Sources → Add data source
-3. Prometheus 선택
-4. URL: `http://TARGET_HOST:9091` (기본: http://localhost:9091)
-5. Save & Test
-
-## 🧪 Testing
-
-### 좀비 파드 테스트
-
-Target Cluster에는 테스트용 좀비 파드들이 미리 배포되어 있습니다:
-
-```bash
-# 실행 중인 컨테이너 확인
-docker ps --filter "network=tc-network"
-
-# 좀비 컨테이너 확인
-docker ps --filter "label=app-type=zombie"
-
-# 좀비 컨테이너 로그 확인
-docker logs app-zombie-sleeper
-docker logs app-zombie-completed
-docker logs app-zombie-test
-docker logs app-zombie-dev
-```
-
-### 좀비 파드 삭제 테스트
-
-```bash
-# .env에서 DRY_RUN을 False로 설정 (실제 삭제)
-vim .env
-# DRY_RUN=False
-
-# cj start로 서비스 시작
-cj start
-
-# cj logs로 로그 확인
+# 4) 로그 확인
 cj logs janitor
-
-# 삭제 로그 확인 (MySQL)
-kubectl exec -it mysql -n default -- mysql -uroot -prootpassword cloud_janitor -e "SELECT * FROM deletion_logs ORDER BY deleted_at DESC LIMIT 10;"
-
-# 삭제된 컨테이너 확인
-docker ps -a --filter "label=app-type=zombie" | grep Exited
+tc logs promtail
 ```
-
-### 트러블슈팅
-
-**문제**: Cloud Janitor가 좀비 파드를 감지하지 못함
-- **해결**: 
-  ```bash
-  # Target Prometheus 접속 확인
-  curl http://localhost:9091/-/healthy
-  
-  # PromQL 쿼리 테스트
-  curl -X POST http://localhost:9091/api/v1/query -d 'query=rate(container_cpu_usage_seconds_total{name!=""}[2m]) < 0.01'
-  
-  # Cloud Janitor 로그 확인
-  cj logs janitor
-  ```
-
-**문제**: 컨테이너 삭제가 실패함
-- **해결**:
-  ```bash
-  # Docker Socket 접근 권한 확인
-  kubectl exec -it cloud-janitor -n default -- ls -la /var/run/docker.sock
-  
-  # 권한 설정 확인
-  kubectl get pod cloud-janitor -n default -o yaml | grep -A 10 volumeMounts
-  ```
-
-**문제**: Target Prometheus에 연결할 수 없음
-- **해결**:
-  ```bash
-  # TARGET_HOST 확인
-  cj env
-  # TARGET_HOST=192.168.1.100 (실제 target 서버 IP)
-  
-  # Target Prometheus 접속 확인
-  curl http://192.168.1.100:9091/-/healthy
-  
-# Target Prometheus 시작
-tc pm start
-  ```

@@ -12,11 +12,12 @@
     kind: Pod
     namespace: monitoring
     label_selectors:
-      - app.kubernetes.io/name = grafana
+      - app = grafana
   register: grafana_pod
-  until: grafana_pod.resources[0].status.phase == "Running"
+  until: grafana_pod.resources | length > 0 and grafana_pod.resources[0].status.phase == "Running"
   retries: 30
   delay: 5
+  failed_when: false
 
 - name: Create Grafana DataSource for Target Prometheus
   kubernetes.core.k8s:
@@ -43,6 +44,7 @@
                 timeInterval: 15s
                 queryTimeout: 30s
                 httpMethod: POST
+  when: grafana_pod.resources | length > 0
 
 # -----------------------------------------------------------------------------
 # 2. Promtail 설정 (Target Cluster 로그를 Management Loki로 전송)
@@ -79,9 +81,8 @@
   ansible.builtin.uri:
     url: "{{ target_prometheus_url }}/api/v1/query"
     method: POST
-    body_format: json
-    body:
-      query: "up"
+    body_format: form-urlencoded
+    body: "query=up"
     return_content: true
   register: prometheus_query
   until: prometheus_query.status == 200

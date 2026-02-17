@@ -49,10 +49,13 @@ TC(Target Cluster) → cj(Cloud Janitor) 연결 요청 스크립트
 OPTIONS:
     -h, --help              이 도움말을 표시
     -a, --cj-host HOST      cj(Cloud Janitor) 주소 (필수)
-    -p, --cj-port PORT      cj API 포트 (기본값: 30800)
+    -p, --cj-port PORT      cj API 포트 (기본값: CJ_PORT 또는 30800)
     -n, --name NAME         TC 이름 (기본값: tc-target)
-    --prom-url URL          TC Prometheus URL (기본값: http://localhost:9091)
+    --prom-url URL          TC Prometheus URL (미지정 시 실행 중인 compose 기준 자동 감지)
     --docker-url URL        TC Docker API URL (기본값: unix:///var/run/docker.sock)
+    --loki-url URL          TC Promtail용 Loki Push URL 직접 지정
+    --loki-port PORT        CJ Loki 포트 (기본값: CJ_LOKI_PORT 또는 31000)
+    --whitelist NAMES       예외 컨테이너 목록 (쉼표 구분)
     --labels KEY=VALUE      TC 라벨 (여러 개 가능)
     --check                연결 상태만 확인
 
@@ -78,13 +81,25 @@ EOF
 }
 
 # 파라미터 파싱
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TC_ENV_FILE="$SCRIPT_DIR/.env"
+
+# Load TC-local .env if present (for defaults)
+if [ -f "$TC_ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$TC_ENV_FILE"
+fi
+
 CJ_HOST=""
-CJ_PORT="30800"
+CJ_PORT="${CJ_PORT:-30800}"
 TC_NAME="tc-target"
-TC_PROM_URL="http://localhost:9091"
+TC_PROM_URL="${TC_PROM_URL:-}"
 TC_DOCKER_URL="unix:///var/run/docker.sock"
+TC_WHITELIST=""
 TC_LABELS=()
 CHECK_ONLY=false
+LOKI_PUSH_URL="${LOKI_URL_OVERRIDE:-}"
+CJ_LOKI_PORT="${CJ_LOKI_PORT:-31000}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -111,6 +126,18 @@ while [[ $# -gt 0 ]]; do
             TC_DOCKER_URL="$2"
             shift 2
             ;;
+        --loki-url)
+            LOKI_PUSH_URL="$2"
+            shift 2
+            ;;
+        --loki-port)
+            CJ_LOKI_PORT="$2"
+            shift 2
+            ;;
+        --whitelist)
+            TC_WHITELIST="$2"
+            shift 2
+            ;;
         --labels)
             TC_LABELS+=("$2")
             shift 2
@@ -125,6 +152,33 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+resolve_default_prom_url() {
+    local mapped=""
+    local detected=""
+
+    if docker compose version >/dev/null 2>&1; then
+        mapped=$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    elif command -v docker-compose >/dev/null 2>&1; then
+        mapped=$(docker-compose -f "$SCRIPT_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    fi
+
+    if [ -n "$mapped" ]; then
+        local port="${mapped##*:}"
+        if [[ "$port" =~ ^[0-9]+$ ]]; then
+            detected="http://localhost:$port"
+        fi
+    fi
+
+    if [ -z "$detected" ]; then
+        detected="http://localhost:9091"
+    fi
+    echo "$detected"
+}
+
+if [ -z "$TC_PROM_URL" ]; then
+    TC_PROM_URL="$(resolve_default_prom_url)"
+fi
 
 # =============================================================================
 # 사전 체크
@@ -161,6 +215,30 @@ fi
 
 log_step "📤 연결 요청 데이터 준비"
 
+BASE_WHITELIST="${CJ_CONTAINER_WHITELIST:-target-prometheus,promtail,cadvisor}"
+CUSTOM_WHITELIST=""
+CUSTOM_WHITELIST_FILE="$SCRIPT_DIR/.whitelist.custom"
+if [ -f "$CUSTOM_WHITELIST_FILE" ]; then
+    CUSTOM_WHITELIST=$(tr -d '\n' < "$CUSTOM_WHITELIST_FILE")
+fi
+# --whitelist가 전달되면 custom 화이트리스트를 1회 오버라이드
+if [ -n "$TC_WHITELIST" ]; then
+    CUSTOM_WHITELIST="$TC_WHITELIST"
+fi
+TC_WHITELIST=$(python3 -c '
+import sys
+base = [x.strip() for x in (sys.argv[1] or "").split(",") if x.strip()]
+custom = [x.strip() for x in (sys.argv[2] or "").split(",") if x.strip()]
+seen = set()
+out = []
+for x in base + custom:
+    if x in seen:
+        continue
+    seen.add(x)
+    out.append(x)
+print(",".join(out))
+' "$BASE_WHITELIST" "$CUSTOM_WHITELIST")
+
 # TC 정보 수집
 TC_HOSTNAME=$(hostname)
 TC_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
@@ -174,6 +252,9 @@ log_info "  - IP:       $TC_IP"
 log_info "  - OS:       $TC_OS"
 log_info "  - 아키텍처: $TC_ARCH"
 log_info "  - Prometheus: $TC_PROM_URL"
+log_info "  - WhiteList(base):   $BASE_WHITELIST"
+log_info "  - WhiteList(custom): ${CUSTOM_WHITELIST:-<none>}"
+log_info "  - WhiteList(send):   $TC_WHITELIST"
 
 # 라벨 포맷팅
 LABELS_JSON="{}"
@@ -182,6 +263,130 @@ for label in "${TC_LABELS[@]}"; do
     value=$(echo "$label" | cut -d'=' -f2-)
     LABELS_JSON=$(echo "$LABELS_JSON" | sed "s/{}/{\"$key\":\"$value\",/g" | sed 's/,$//')
 done
+
+# 컨테이너 ID -> 이름/역할 매핑 수집
+# 우선순위:
+# 1) docker compose ps (TC 앱 기준)
+# 2) docker ps --filter network=tc-network (fallback)
+CONTAINER_MAP_JSON="{}"
+if command -v docker >/dev/null 2>&1; then
+    collect_map_from_compose() {
+        "$@" ps --format json 2>/dev/null | python3 -c '
+import json, sys, subprocess
+
+def infer_type(name, service):
+    text = (name or service or "").lower()
+    if "zombie" in text:
+        return "zombie"
+    if "active" in text:
+        return "active"
+    return "unknown"
+
+raw = sys.stdin.read().strip()
+rows = []
+if raw:
+    # New compose: JSON array
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict):
+            rows = [data]
+    except Exception:
+        # Old compose: one JSON object per line
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+                if isinstance(item, dict):
+                    rows.append(item)
+            except Exception:
+                pass
+
+out = {}
+for row in rows:
+    cid = str(row.get("ID") or row.get("Id") or row.get("id") or "")
+    name = str(row.get("Name") or row.get("name") or "")
+    service = str(row.get("Service") or row.get("service") or "")
+    if not cid:
+        continue
+    short = cid[:12]
+    app_type = ""
+    zombie_type = ""
+
+    # Try to read labels directly from docker inspect for 정확한 type/zombie_type.
+    try:
+        inspect = subprocess.check_output(
+            ["docker", "inspect", "-f", "{{json .Config.Labels}}", short],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        labels = json.loads(inspect) if inspect and inspect != "null" else {}
+        app_type = str((labels or {}).get("app-type") or "")
+        zombie_type = str((labels or {}).get("zombie-type") or "")
+    except Exception:
+        pass
+
+    if not app_type:
+        app_type = infer_type(name, service)
+
+    out[short] = {
+        "name": name or service or short,
+        "type": app_type,
+        "zombie_type": zombie_type,
+    }
+
+print(json.dumps(out, ensure_ascii=False))
+'
+    }
+
+    collect_map_from_docker_ps() {
+        docker ps --filter "network=tc-network" \
+            --format '{{.ID}}|{{.Names}}|{{.Label "app-type"}}|{{.Label "zombie-type"}}' | \
+            python3 -c '
+import sys, json
+m = {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    parts = line.split("|")
+    if len(parts) < 4:
+        continue
+    cid, name, app_type, zombie_type = parts[0], parts[1], parts[2], parts[3]
+    m[cid[:12]] = {
+        "name": name,
+        "type": app_type or "unknown",
+        "zombie_type": zombie_type or ""
+    }
+print(json.dumps(m, ensure_ascii=False))
+'
+    }
+
+    if docker compose ps --format json >/dev/null 2>&1; then
+        CONTAINER_MAP_JSON=$(collect_map_from_compose docker compose || echo "{}")
+    elif command -v docker-compose >/dev/null 2>&1 && docker-compose ps --format json >/dev/null 2>&1; then
+        CONTAINER_MAP_JSON=$(collect_map_from_compose docker-compose || echo "{}")
+    fi
+
+    # compose 결과가 비었으면 네트워크 기준 fallback
+    if [ -z "$CONTAINER_MAP_JSON" ] || [ "$CONTAINER_MAP_JSON" = "{}" ]; then
+        CONTAINER_MAP_JSON=$(collect_map_from_docker_ps || echo "{}")
+    fi
+fi
+
+# labels에 container_map / container_whitelist 병합
+LABELS_JSON=$(python3 -c '
+import json, sys
+labels = json.loads(sys.argv[1]) if sys.argv[1] else {}
+container_map = json.loads(sys.argv[2]) if sys.argv[2] else {}
+whitelist = [x.strip() for x in (sys.argv[3] or "").split(",") if x.strip()]
+labels["container_map"] = container_map
+labels["container_whitelist"] = whitelist
+print(json.dumps(labels, ensure_ascii=False))
+' "$LABELS_JSON" "$CONTAINER_MAP_JSON" "$TC_WHITELIST")
 
 # JSON 요청 본문 생성
 REQUEST_BODY=$(cat << EOF
@@ -225,8 +430,18 @@ check_connection() {
         echo "$REGISTERED_TCS" | python3 -m json.tool 2>/dev/null || echo "$REGISTERED_TCS"
         echo ""
 
-        # 현재 TC가 등록되었는지 확인
-        if echo "$REGISTERED_TCS" | grep -q "\"tc_name\":\"$TC_NAME\""; then
+        # 현재 TC가 등록되었는지 확인 (JSON 파싱 기반)
+        if echo "$REGISTERED_TCS" | python3 -c '
+import sys, json
+target = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+if isinstance(data, list) and any(str(item.get("tc_name")) == target for item in data if isinstance(item, dict)):
+    raise SystemExit(0)
+raise SystemExit(1)
+' "$TC_NAME"; then
             log_success "TC '$TC_NAME'가 cj에 등록되어 있습니다."
         else
             log_warning "TC '$TC_NAME'가 cj에 등록되어 있지 않습니다."
@@ -283,6 +498,39 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
     SUCCESS_MSG=$(echo "$RESPONSE_BODY" | python3 -c "import sys, json; print(json.load(sys.stdin).get('message', 'No message'))" 2>/dev/null || echo "등록 완료")
 
     log_success "$SUCCESS_MSG"
+
+    # -----------------------------------------------------------------------------
+    # TC Promtail -> CJ Loki 연결 자동 설정
+    # -----------------------------------------------------------------------------
+    if [ -z "$LOKI_PUSH_URL" ]; then
+        local_loki_host="${CJ_LOKI_HOST:-}"
+        if [ "$CJ_HOST" = "localhost" ] || [ "$CJ_HOST" = "127.0.0.1" ]; then
+            # promtail 컨테이너 기준 localhost는 자기 자신이라 host gateway 사용
+            local_loki_host="${local_loki_host:-host.docker.internal}"
+        else
+            local_loki_host="${local_loki_host:-$CJ_HOST}"
+        fi
+        LOKI_PUSH_URL="http://${local_loki_host}:${CJ_LOKI_PORT}"
+    fi
+
+    log_info "TC Promtail Loki URL 설정: $LOKI_PUSH_URL"
+    if [ -f "$TC_ENV_FILE" ]; then
+        if grep -q '^LOKI_URL=' "$TC_ENV_FILE"; then
+            sed -i "s|^LOKI_URL=.*|LOKI_URL=$LOKI_PUSH_URL|" "$TC_ENV_FILE"
+        else
+            echo "LOKI_URL=$LOKI_PUSH_URL" >> "$TC_ENV_FILE"
+        fi
+    else
+        echo "LOKI_URL=$LOKI_PUSH_URL" > "$TC_ENV_FILE"
+    fi
+
+    # promtail 재시작으로 변경사항 반영
+    if command -v docker-compose >/dev/null 2>&1; then
+        (cd "$SCRIPT_DIR" && docker-compose up -d promtail)
+    else
+        (cd "$SCRIPT_DIR" && docker compose up -d promtail)
+    fi
+    log_success "TC Promtail 설정 반영 완료"
 
     # =============================================================================
     # 연결 요청 완료 요약
