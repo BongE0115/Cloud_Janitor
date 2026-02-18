@@ -140,3 +140,123 @@
       - "ID       : {{ grafana_admin_user }}"
       - "PW       : {{ grafana_admin_password }}"
       - "---------------------------------------------------"
+
+# ── Datasource: MySQL (CloudJanitorDB) Create/Update + UID ──────────────────
+
+- name: Get existing CloudJanitorDB datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/name/CloudJanitorDB"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: _mysql_existing
+
+- name: Create CloudJanitorDB datasource (MySQL)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: CloudJanitorDB
+      type: mysql
+      url: "mysql.default.svc.cluster.local:3306"
+      user: "root"
+      access: proxy
+      isDefault: false
+      jsonData:
+        database: "cloud_janitor"
+        tlsAuth: false
+        tlsAuthWithCACert: false
+      secureJsonData:
+        password: "rootpassword"
+    status_code: [200]
+  when: _mysql_existing.status == 404
+
+- name: Update CloudJanitorDB datasource (MySQL)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/{{ _mysql_existing.json.id }}"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: CloudJanitorDB
+      type: mysql
+      url: "mysql.default.svc.cluster.local:3306"
+      user: "root"
+      access: proxy
+      isDefault: false
+      jsonData:
+        database: "cloud_janitor"
+        tlsAuth: false
+        tlsAuthWithCACert: false
+      secureJsonData:
+        password: "rootpassword"
+    status_code: [200, 403]
+  when: _mysql_existing.status == 200
+
+- name: Re-fetch CloudJanitorDB datasource (to get UID)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/name/CloudJanitorDB"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200]
+  register: _mysql_ds
+
+- name: Set MySQL datasource UID fact
+  ansible.builtin.set_fact:
+    mysql_ds_uid: "{{ _mysql_ds.json.uid }}"
+
+# ── Alerting: Alert rule (JSON file) ───────────────────────────────────────
+
+- name: Load alert rule JSON and inject MySQL datasource UID
+  ansible.builtin.set_fact:
+    _alert_rules_payload: >-
+      {{
+        (lookup('file', role_path + '/files/grafana-alerts.json')
+        | replace('__MYSQL_DS_UID__', mysql_ds_uid))
+        | from_json
+      }}
+
+- name: Apply alert rule (create)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/alert-rules"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/json"
+      X-Disable-Provenance: "true"
+    body_format: json
+    body: "{{ _alert_rules_payload }}"
+    status_code: [200, 201, 202]
+
+# ── Alerting: Contact points (JSON file) ────────────────────────────────────
+
+- name: Load contact points JSON
+  ansible.builtin.set_fact:
+    _contact_points_payload: "{{ lookup('file', role_path + '/files/contact-points.json') | from_json }}"
+
+- name: Apply contact points (create/update)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/contact-points"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/json"
+      X-Disable-Provenance: "true"
+    body_format: json
+    body: "{{ item }}"
+    status_code: [200, 201, 202]
+  loop: "{{ _contact_points_payload }}"
