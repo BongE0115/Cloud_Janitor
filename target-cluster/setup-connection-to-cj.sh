@@ -494,15 +494,19 @@ echo "$RESPONSE_BODY" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE_BODY
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
     log_success "연결 요청이 성공했습니다! (HTTP $HTTP_CODE)"
 
-    # 응답에서 메시지 추출
+    # 응답에서 메시지/설정 추출
     SUCCESS_MSG=$(echo "$RESPONSE_BODY" | python3 -c "import sys, json; print(json.load(sys.stdin).get('message', 'No message'))" 2>/dev/null || echo "등록 완료")
+    CJ_LOKI_PUSH_URL_FROM_API=$(echo "$RESPONSE_BODY" | python3 -c "import sys, json; print((json.load(sys.stdin).get('loki_push_url') or '').strip())" 2>/dev/null || echo "")
 
     log_success "$SUCCESS_MSG"
 
     # -----------------------------------------------------------------------------
     # TC Promtail -> CJ Loki 연결 자동 설정
     # -----------------------------------------------------------------------------
-    if [ -z "$LOKI_PUSH_URL" ]; then
+    if [ -n "$CJ_LOKI_PUSH_URL_FROM_API" ]; then
+        LOKI_PUSH_URL="$CJ_LOKI_PUSH_URL_FROM_API"
+        log_info "CJ 응답에서 Loki URL 수신: $LOKI_PUSH_URL"
+    elif [ -z "$LOKI_PUSH_URL" ]; then
         local_loki_host="${CJ_LOKI_HOST:-}"
         if [ "$CJ_HOST" = "localhost" ] || [ "$CJ_HOST" = "127.0.0.1" ]; then
             # promtail 컨테이너 기준 localhost는 자기 자신이라 host gateway 사용

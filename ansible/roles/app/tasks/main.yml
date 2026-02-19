@@ -261,7 +261,7 @@
                 imagePullPolicy: IfNotPresent
                 env:
                   - name: LOKI_URL
-                    value: "http://loki.monitoring.svc.cluster.local:3100"
+                    value: "{{ env_vars['LOKI_URL'] | default('http://loki.monitoring.svc.cluster.local:3100') }}"
                   - name: DB_HOST
                     valueFrom:
                       secretKeyRef:
@@ -334,7 +334,7 @@
                 
                 env:
                   - name: LOKI_URL
-                    value: "http://loki.monitoring.svc.cluster.local:3100"
+                    value: "{{ env_vars['LOKI_URL'] | default('http://loki.monitoring.svc.cluster.local:3100') }}"
                 
                   # Database Configuration
                   - name: DB_HOST
@@ -497,7 +497,7 @@
                     env:
                       # Copy same environment variables from deployment
                       - name: LOKI_URL
-                        value: "http://loki.monitoring.svc.cluster.local:3100"
+                        value: "{{ env_vars['LOKI_URL'] | default('http://loki.monitoring.svc.cluster.local:3100') }}"
                       - name: DB_HOST
                         valueFrom:
                           secretKeyRef:

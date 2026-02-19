@@ -39,6 +39,27 @@ ensure_tc_dir() {
     fi
 }
 
+get_prometheus_local_url() {
+    local mapped=""
+    local port=""
+
+    if docker compose version >/dev/null 2>&1; then
+        mapped=$(docker compose -f "$TC_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    elif command -v docker-compose >/dev/null 2>&1; then
+        mapped=$(docker-compose -f "$TC_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    fi
+
+    if [ -n "$mapped" ]; then
+        port="${mapped##*:}"
+        if [[ "$port" =~ ^[0-9]+$ ]]; then
+            echo "http://localhost:$port"
+            return 0
+        fi
+    fi
+
+    echo "http://localhost:9091"
+}
+
 usage() {
     echo -e "${BOLD}TC CLI Tool${NC}"
     echo ""
@@ -350,7 +371,9 @@ cmd_connect() {
     fi
     
     # Prometheus가 실행 중인지 확인, 없으면 설치
-    if ! curl -s http://localhost:9091/-/healthy > /dev/null 2>&1; then
+    local prom_url
+    prom_url="$(get_prometheus_local_url)"
+    if ! curl -s "$prom_url/-/healthy" > /dev/null 2>&1; then
         log_info "Prometheus가 실행 중이 아닙니다. 설치를 시작합니다..."
         cmd_prometheus start
         echo ""
@@ -376,10 +399,12 @@ cmd_status() {
     docker ps --filter "network=tc-network" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
 
     if command -v curl &> /dev/null; then
-        if curl -s http://localhost:9091/-/healthy > /dev/null 2>&1; then
-            log_success "Prometheus 정상 (http://localhost:9091)"
+        local prom_url
+        prom_url="$(get_prometheus_local_url)"
+        if curl -s "$prom_url/-/healthy" > /dev/null 2>&1; then
+            log_success "Prometheus 정상 ($prom_url)"
         else
-            log_warning "Prometheus 헬스 체크 실패 (http://localhost:9091)"
+            log_warning "Prometheus 헬스 체크 실패 ($prom_url)"
         fi
     else
         log_warning "curl이 없어 Prometheus 헬스 체크를 건너뜁니다."
@@ -419,10 +444,12 @@ cmd_prometheus() {
             log_info "Target Prometheus 상태 확인 중..."
             docker ps --filter "name=target-prometheus" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
             if command -v curl &> /dev/null; then
-                if curl -s http://localhost:9091/-/healthy > /dev/null 2>&1; then
-                    log_success "Prometheus 정상 (http://localhost:9091)"
+                local prom_url
+                prom_url="$(get_prometheus_local_url)"
+                if curl -s "$prom_url/-/healthy" > /dev/null 2>&1; then
+                    log_success "Prometheus 정상 ($prom_url)"
                 else
-                    log_warning "Prometheus 헬스 체크 실패 (http://localhost:9091)"
+                    log_warning "Prometheus 헬스 체크 실패 ($prom_url)"
                 fi
             fi
             ;;

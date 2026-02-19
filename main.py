@@ -503,6 +503,21 @@ def register_tc(tc_info):
     }, 200
 
 
+def build_loki_push_url(cj_host):
+    """Build Loki push URL for TC promtail.
+
+    Priority:
+    1) LOKI_URL
+    2) http://<cj_host>:31000 (fallback)
+    """
+    configured = (os.getenv("LOKI_URL") or "").strip()
+    if configured:
+        return configured
+
+    host = (cj_host or "").strip() or "localhost"
+    return f"http://{host}:31000"
+
+
 def update_tc_whitelist(tc_name, payload):
     """Update TC container whitelist only."""
     whitelist = payload.get("container_whitelist")
@@ -572,7 +587,11 @@ class RequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": "invalid json"})
                 return
             
+            # Use request host so TC can receive an externally reachable Loki URL.
+            req_host = self.headers.get("Host", "").split(":")[0].strip()
             result, status = register_tc(payload)
+            if status in (200, 201) and isinstance(result, dict):
+                result["loki_push_url"] = build_loki_push_url(req_host)
             self._send_json(status, result)
             return
 

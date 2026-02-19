@@ -76,22 +76,26 @@ flowchart TB
     end
 
     %% 데이터 흐름 - TC 내부
-    TC_Apps -->|CPU/메모리/네트워크| TC_Prometheus
-    TC_Apps -->|컨테이너 로그| TC_Promtail
+    TC_Apps -->|"CPU/메모리/네트워크"| TC_Prometheus
+    TC_Apps -->|"컨테이너 로그"| TC_Promtail
 
     %% TC → cj 연결
-    TC_Promtail -->|로그 전송| CJ_Loki
-    CJ_Janitor -.->|PromQL 폴링<br/>(CPU/네트워크)| TC_Prometheus
-    CJ_Janitor -.->|Docker API<br/>(좀비 삭제)| TC_Apps
+    TC_Promtail -->|"로그 전송"| CJ_Loki
+    
+    %% [수정됨] 특수문자 및 괄호 파싱 에러 방지를 위해 라벨을 " "로 감싸고 표준 점선 문법 적용
+    CJ_Janitor -.->|"PromQL 폴링<br/>(CPU/네트워크)"| TC_Prometheus
+    CJ_Janitor -.->|"Docker API<br/>(좀비 삭제)"| TC_Apps
 
     %% cj 내부 데이터 흐름
-    CJ_Janitor -->|Pod stdout 로그| CJ_Promtail
-    CJ_Promtail -->|로그 전송| CJ_Loki
-    CJ_Janitor -->|삭제 기록| CJ_MySQL
+    CJ_Janitor -->|"Pod stdout 로그"| CJ_Promtail
+    CJ_Promtail -->|"로그 전송"| CJ_Loki
+    CJ_Janitor -->|"삭제 기록"| CJ_MySQL
 
     %% 데이터 소스
-    CJ_Loki -->|Cloud Janitor 로그<br/>(좀비 감지 기록)| CJ_Grafana
-    TC_Prometheus -.->|메트릭<br/>(네트워크 등)| CJ_Grafana
+    CJ_Loki -->|"Cloud Janitor 로그<br/>(좀비 감지 기록)"| CJ_Grafana
+    
+    %% [수정됨] 점선 화살표 라벨 문법 통일
+    TC_Prometheus -.->|"메트릭<br/>(네트워크 등)"| CJ_Grafana
 ```
 
 ### 핵심 설계 원칙

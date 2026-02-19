@@ -106,21 +106,98 @@ fi
 log_success "Docker Compose 확인 완료"
 
 # 포트 충돌 체크
+port_in_use() {
+    local port=$1
+    lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1
+}
+
 check_port() {
     local port=$1
-    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1; then
+    if port_in_use "$port"; then
         log_warning "포트 $port가 이미 사용 중입니다."
         return 1
     fi
     return 0
 }
 
+compose_up() {
+    if command -v docker-compose &> /dev/null; then
+        docker-compose up -d "$@"
+    else
+        docker compose up -d "$@"
+    fi
+}
+
+compose_pull() {
+    if command -v docker-compose &> /dev/null; then
+        docker-compose pull
+    else
+        docker compose pull
+    fi
+}
+
+candidate_ports() {
+    local seed="${PROMETHEUS_PORT_CANDIDATES:-9091 19091 29091 39091}"
+    local requested="${PROMETHEUS_HOST_PORT:-}"
+    local seen=" "
+    if [ -n "$requested" ]; then
+        echo -n "$requested "
+        seen="$seen$requested "
+    fi
+    for p in $seed; do
+        if [[ "$seen" != *" $p "* ]]; then
+            echo -n "$p "
+            seen="$seen$p "
+        fi
+    done
+}
+
+start_with_prometheus_port_retry() {
+    local services=("$@")
+    local output=""
+    local tried_any=false
+
+    for port in $(candidate_ports); do
+        tried_any=true
+
+        # 이미 점유된 포트는 선제 스킵
+        if port_in_use "$port"; then
+            log_warning "포트 $port가 이미 사용 중입니다. 다음 후보를 시도합니다."
+            continue
+        fi
+
+        export PROMETHEUS_HOST_PORT="$port"
+        log_info "Prometheus 호스트 포트 시도: $PROMETHEUS_HOST_PORT"
+
+        if output=$(compose_up "${services[@]}" 2>&1); then
+            [ -n "$output" ] && echo "$output"
+            return 0
+        fi
+
+        echo "$output"
+        if echo "$output" | grep -q "ports are not available"; then
+            log_warning "포트 $port 바인딩 실패. 다음 후보를 시도합니다."
+            continue
+        fi
+
+        log_error "컨테이너 시작 실패"
+        return 1
+    done
+
+    if [ "$tried_any" = false ]; then
+        log_error "Prometheus 포트 후보가 비어 있습니다. PROMETHEUS_PORT_CANDIDATES를 확인하세요."
+    else
+        log_error "사용 가능한 Prometheus 포트를 찾지 못했습니다."
+    fi
+    return 1
+}
+
 if [ "$MODE" = "apps" ]; then
     PORTS=(8081 8082)
 elif [ "$MODE" = "prometheus" ]; then
-    PORTS=(9091 8080)
+    PORTS=(8080)
 else
-    PORTS=(9091 8081 8082 8080)
+    PORTS=(8081 8082 8080)
 fi
 PORT_CONFLICT=false
 
@@ -165,30 +242,18 @@ docker network create tc-network 2>/dev/null || log_warning "네트워크가 이
 # 이미지 풀
 if [ "$PULL_IMAGES" = true ]; then
     log_info "Docker 이미지 다운로드 중..."
-    docker-compose pull || log_warning "이미지 pull 중 일부 오류 발생 (무시)"
+    compose_pull || log_warning "이미지 pull 중 일부 오류 발생 (무시)"
     log_success "이미지 다운로드 완료"
 fi
 
 # 컨테이너 시작
 log_info "컨테이너 시작 중..."
 if [ "$MODE" = "apps" ]; then
-    if command -v docker-compose &> /dev/null; then
-        docker-compose up -d app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
-    else
-        docker compose up -d app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
-    fi
+    compose_up app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
 elif [ "$MODE" = "prometheus" ]; then
-    if command -v docker-compose &> /dev/null; then
-        docker-compose up -d prometheus cadvisor promtail
-    else
-        docker compose up -d prometheus cadvisor promtail
-    fi
+    start_with_prometheus_port_retry prometheus cadvisor promtail
 else
-    if command -v docker-compose &> /dev/null; then
-        docker-compose up -d
-    else
-        docker compose up -d
-    fi
+    start_with_prometheus_port_retry
 fi
 
 log_success "컨테이너 시작 완료"
@@ -233,7 +298,7 @@ if [ "$MODE" != "apps" ]; then
     MAX_PROM_CHECK=10
 
     while [ $PROM_CHECK_COUNT -lt $MAX_PROM_CHECK ]; do
-        if curl -s http://localhost:9091/-/healthy > /dev/null 2>&1; then
+        if curl -s "http://localhost:${PROMETHEUS_HOST_PORT:-9091}/-/healthy" > /dev/null 2>&1; then
             log_success "Prometheus가 정상적으로 실행 중입니다."
             break
         fi
@@ -280,7 +345,7 @@ if [ "$MODE" = "prometheus" ]; then
     echo "=========================================="
     echo ""
     echo "📊 주요 서비스:"
-    echo "   - Prometheus:       http://localhost:9091"
+    echo "   - Prometheus:       http://localhost:${PROMETHEUS_HOST_PORT:-9091}"
     echo "   - cAdvisor:        http://localhost:8080"
     echo "   - Promtail:        http://localhost:9080"
     echo ""
@@ -308,7 +373,7 @@ echo "🎉 Target Cluster 설치 완료!"
 echo "=========================================="
 echo ""
 echo "📊 주요 서비스:"
-echo "   - Prometheus:       http://localhost:9091"
+echo "   - Prometheus:       http://localhost:${PROMETHEUS_HOST_PORT:-9091}"
 echo "   - cAdvisor:        http://localhost:8080"
 echo "   - Active App:       http://localhost:8081"
 echo "   - Zombie Test App:  http://localhost:8082"
@@ -323,7 +388,7 @@ echo "🔧 유용한 명령어:"
 echo "   - 로그 확인:     docker-compose logs -f [container_name]"
 echo "   - 컨테이너 목록: docker-compose ps"
 echo "   - 전체 중지:     ./teardown.sh"
-echo "   - Prometheus UI: http://localhost:9091"
+echo "   - Prometheus UI: http://localhost:${PROMETHEUS_HOST_PORT:-9091}"
 echo ""
 echo "📝 PromQL 쿼리 예시 (Cloud Janitor에서 사용):"
 echo "   - CPU 낮은 컨테이너:"

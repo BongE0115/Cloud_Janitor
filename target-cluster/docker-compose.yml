@@ -15,7 +15,7 @@ services:
     container_name: target-prometheus
     restart: unless-stopped
     ports:
-      - "9091:9090"  # localhost:9091로 접근 (Management와 충돌 방지)
+      - "${PROMETHEUS_HOST_PORT:-9091}:9090"  # localhost:${PROMETHEUS_HOST_PORT}로 접근
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
