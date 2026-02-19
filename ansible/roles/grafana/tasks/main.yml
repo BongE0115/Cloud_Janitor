@@ -260,3 +260,23 @@
     body: "{{ item }}"
     status_code: [200, 201, 202]
   loop: "{{ _contact_points_payload }}"
+
+# ── Alerting: Notification policy (route) ───────────────────────────────────
+
+- name: Load notification policy JSON
+  ansible.builtin.set_fact:
+    _policy_payload: "{{ lookup('file', role_path + '/files/notification-policy.json') | from_json }}"
+
+- name: Apply notification policy (replace)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/policies"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/json"
+      X-Disable-Provenance: "true"
+    body_format: json
+    body: "{{ _policy_payload }}"
+    status_code: [200, 202]
