@@ -22,6 +22,5 @@ CREATE TABLE zombie_lifecycle (
     wasted_cost DECIMAL(10, 5) DEFAULT 0.0,               -- 이 파드를 삭제함으로써 절약한 비용
 
     -- [Comment] 조회 성능 및 중복 방지 설정
-    INDEX idx_status (status),
-    UNIQUE KEY uq_pod (pod_name, namespace)              -- 같은 파드가 중복 등록되지 않도록 설정
+    INDEX idx_status (status)
 );

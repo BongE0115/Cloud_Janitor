@@ -30,7 +30,7 @@ def main():
         "LIMIT_MEM_MI": float(os.getenv('LIMIT_MEM_MI', 1.0)),      # 메모리 1MiB 미만 (로그 출력 및 참고용)
         
         # --- [유예 기간 설정] ---
-        "GRACE_PERIOD_MINUTES": int(os.getenv('GRACE_PERIOD_MINUTES', 3)), # 좀비 탐지 후 삭제까지 대기할 유예 기간 (분 단위)
+        "GRACE_PERIOD_MINUTES": int(os.getenv('GRACE_PERIOD_MINUTES', 1)), # 좀비 탐지 후 삭제까지 대기할 유예 기간 (분 단위)
         #  "GRACE_PERIOD_DAYS": int(os.getenv('GRACE_PERIOD_DAYS', 3)), 좀비 탐지 후 삭제까지 대기할 유예 기간 (일 단위)
         # --- [비용 계산] ---
         "COST_PER_CORE_HOUR": float(os.getenv('COST_PER_CORE_HOUR', 0.1)), # 시간당 1코어 사용 시 발생하는 비용 ($)
