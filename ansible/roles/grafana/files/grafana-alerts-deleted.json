@@ -1,0 +1,52 @@
+{
+  "uid": "deleted-alerts",
+  "title": "좀비 파드 삭제 완료",
+  "ruleGroup": "CloudJanitorAlerts",
+  "folderUID": "cloud-janitor",
+  "condition": "C",
+  "for": "30s",
+  "noDataState": "OK",
+  "execErrState": "OK",
+  "annotations": {
+    "summary": "[Cloud Janitor] 좀비 파드 삭제 완료",
+    "description": "{{ $values.B.Value }}개의 좀비 파드가 삭제되었습니다.\n\n※ 자세한 내용은 그라파나 대시보드를 참조하세요."
+  },
+  "data": [
+    {
+      "refId": "A",
+      "datasourceUid": "__MYSQL_DS_UID__",
+      "relativeTimeRange": { "from": 600, "to": 0 },
+      "model": {
+        "format": "time_series",
+        "instant": true,
+        "rawSql": "SELECT NOW() AS time, COUNT(*) AS value FROM zombie_lifecycle WHERE status='DELETED' AND deleted_at IS NOT NULL AND deleted_at >= NOW() - INTERVAL 10 MINUTE;"
+      }
+    },
+    {
+      "refId": "B",
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "reduce",
+        "expression": "A",
+        "reducer": "last",
+        "settings": { "mode": "dropNN" }
+      }
+    },
+    {
+      "refId": "C",
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "threshold",
+        "expression": "B",
+        "conditions": [
+          {
+            "evaluator": { "type": "gt", "params": [0] },
+            "operator": { "type": "and" },
+            "reducer": { "type": "last" },
+            "type": "query"
+          }
+        ]
+      }
+    }
+  ]
+}
