@@ -1,0 +1,10 @@
+[
+  {
+    "name": "email-cloud-janitor",
+    "type": "email",
+    "settings": {
+      "addresses": "moanuna03@tukorea.ac.kr, rudghrnt@gmail.com, kingwy0403@gmail.com, ch0ran7890@gmail.com, bgshin0115@naver.com"
+    },
+    "disableResolveMessage": true
+  }
+]

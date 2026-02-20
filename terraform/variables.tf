@@ -9,4 +9,5 @@ locals {
   }
 
   grafana_password = local.env_file["GRAFANA_PASSWORD"]
+  smtp_password   = local.env_file["SMTP_PASSWORD"]
 }
