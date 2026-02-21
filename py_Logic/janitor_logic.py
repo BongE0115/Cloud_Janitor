@@ -1,7 +1,12 @@
 import logging
 import time
-from .metrics import get_prom_val, get_prom_result, get_docker_containers_fallback
-from .database import save_billing_and_delete, save_latest_scan_snapshot
+from .metrics import get_prom_val, get_docker_containers_fallback
+from .database import (
+    add_or_update_zombie,
+    mark_recovered_pendings,
+    process_cleanup,
+    save_latest_scan_snapshot,
+)
 
 # 로그 기록 방식 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -73,6 +78,7 @@ def run_janitor(config):
     active_count = 0
     safe_count = 0
     snapshot_rows = []
+    zombie_container_names = set()
     
     for container in containers:
         name = container['name']
@@ -179,16 +185,44 @@ def run_janitor(config):
             _q(reason),
         )
         
-        # If zombie and not dry_run, delete via Docker API
+        # Register pending lifecycle row; actual deletion is handled by cleanup job.
         if decision == "🚨 ZOMBIE DETECTED" and not config['DRY_RUN']:
-            try:
-                import docker
-                client = docker.DockerClient(base_url=config.get('DOCKER_API_URL', 'unix:///var/run/docker.sock'))
-                container_obj = client.containers.get(name)
-                container_obj.remove(force=True)
-                logger.info(f"💥 [Deleted] {name}")
-            except Exception as e:
-                logger.error(f"❌ Failed to delete {name}: {e}")
+            pending_name = alias_name or name
+            zombie_container_names.add(str(pending_name))
+            lifecycle_saved = add_or_update_zombie(
+                tc_name=tc_name,
+                container_name=pending_name,
+                short_id=short_id,
+                reason=reason,
+                cpu_m=cpu_val,
+                mem_mi=mem_val,
+                net_b=net_val,
+                config=config,
+            )
+            if lifecycle_saved:
+                logger.info(
+                    "LIFECYCLE_PENDING tc=%s container=%s short_id=%s",
+                    _q(tc_name),
+                    _q(pending_name),
+                    _q(short_id or ""),
+                )
+            else:
+                logger.error(
+                    "LIFECYCLE_PENDING_FAILED tc=%s container=%s short_id=%s",
+                    _q(tc_name),
+                    _q(pending_name),
+                    _q(short_id or ""),
+                )
+
+    # If a previously pending container is no longer zombie in this scan, cancel deletion.
+    if not config['DRY_RUN']:
+        recovered_count = mark_recovered_pendings(tc_name, zombie_container_names, config)
+        if recovered_count > 0:
+            logger.info(
+                "LIFECYCLE_RECOVERED tc=%s count=%s",
+                _q(tc_name),
+                recovered_count,
+            )
     
     print("-" * 150)
     logger.info(f"📊 Summary: {zombie_count} zombies, {candidate_count} candidates, {active_count} active, {safe_count} safe")
@@ -219,3 +253,23 @@ def run_janitor(config):
         )
     except Exception as e:
         logger.error("SNAPSHOT_SAVE_FAILED cycle=%s tc=%s error=%s", cycle_id, _q(tc_name), _q(str(e)))
+
+
+def run_cleanup(config):
+    """Delete due pending lifecycle rows and write status back to DB."""
+    tc_name = config.get('TARGET_NAME') or ''
+    logger.info("🧹 Cleanup cycle start (TC: %s)", tc_name if tc_name else "all")
+
+    try:
+        stats = process_cleanup(config)
+        logger.info(
+            "CLEANUP_SUMMARY tc=%s total=%s deleted=%s already_missing=%s failed=%s dry_run=%s",
+            tc_name if tc_name else "all",
+            stats.get("total", 0),
+            stats.get("deleted", 0),
+            stats.get("already_missing", 0),
+            stats.get("failed", 0),
+            stats.get("dry_run", False),
+        )
+    except Exception as e:
+        logger.error("CLEANUP_FAILED tc=%s error=%s", tc_name if tc_name else "all", str(e))

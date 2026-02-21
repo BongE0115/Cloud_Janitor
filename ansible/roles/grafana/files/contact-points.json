@@ -1,0 +1,11 @@
+[
+  {
+    "uid": "email-cloud-janitor",
+    "name": "email-cloud-janitor",
+    "type": "email",
+    "settings": {
+      "addresses": "__ALERT_EMAILS__"
+    },
+    "disableResolveMessage": true
+  }
+]

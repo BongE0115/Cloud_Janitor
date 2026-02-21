@@ -16,7 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'py_Logic'))
 load_dotenv()
 
 try:
-    from py_Logic.janitor_logic import run_janitor
+    from py_Logic.janitor_logic import run_janitor, run_cleanup
     from py_Logic.database import (
         upsert_registered_target,
         list_registered_targets,
@@ -274,6 +274,7 @@ def build_config():
         "LIMIT_NET_B": float(os.getenv('LIMIT_NET_B', 100.0)),
         "TIME_WINDOW_NET": os.getenv('TIME_WINDOW_NET', '2m'),
         "LIMIT_MEM_MI": float(os.getenv('LIMIT_MEM_MI', 1.0)),
+        "GRACE_PERIOD_MINUTES": int(os.getenv('GRACE_PERIOD_MINUTES', 10)),
         "COST_PER_CORE_HOUR": float(os.getenv('COST_PER_CORE_HOUR', 0.1)),
         "DEFAULT_CPU_REQ": float(os.getenv('DEFAULT_CPU_REQ', 0.2)),
         "DB_CONFIG": {
@@ -284,7 +285,8 @@ def build_config():
             "auth_plugin": "mysql_native_password"
         },
         "PROMETHEUS_URL": os.getenv('PROMETHEUS_URL', 'http://prometheus:9090'),
-        "TARGET_NAME": os.getenv('TARGET_NAME', 'tc-target'),
+        "DOCKER_API_URL": os.getenv('DOCKER_API_URL', 'unix:///var/run/docker.sock'),
+        "TARGET_NAME": os.getenv('TARGET_NAME', ''),
         "CONTAINER_WHITELIST": [x.strip() for x in os.getenv('CONTAINER_WHITELIST', 'target-prometheus,promtail,cadvisor').split(',') if x.strip()],
         "CONTAINER_MAP": {},
         "SCAN_ENABLED": False,
@@ -313,6 +315,8 @@ def build_config():
                 tc_whitelist = labels.get("container_whitelist", [])
                 if isinstance(tc_whitelist, list):
                     config["CONTAINER_WHITELIST"] = [str(x).strip() for x in tc_whitelist if str(x).strip()]
+            if latest.get("docker_api_url"):
+                config["DOCKER_API_URL"] = latest.get("docker_api_url")
             print(f"[INFO] Using internal Prometheus URL: {internal_url}")
     except Exception as e:
         print(f"[WARN] Could not get latest target: {e}")
@@ -327,6 +331,12 @@ def run_scan():
         print(f"[WARN] scan skipped: {config.get('SCAN_SKIP_REASON', 'target not ready')}")
         return
     run_janitor(config)
+
+
+def run_cleanup_cycle():
+    """Run deferred cleanup cycle."""
+    config = build_config()
+    run_cleanup(config)
 
 
 def get_grafana_config():
@@ -630,11 +640,14 @@ def serve():
 def main():
     default_mode = os.getenv("RUN_MODE", "serve")
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", nargs="?", default=default_mode, choices=["serve", "scan"])
+    parser.add_argument("mode", nargs="?", default=default_mode, choices=["serve", "scan", "cleanup"])
     args = parser.parse_args()
     
     if args.mode == "scan":
         run_scan()
+        return
+    if args.mode == "cleanup":
+        run_cleanup_cycle()
         return
     serve()
 

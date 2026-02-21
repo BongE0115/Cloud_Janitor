@@ -71,6 +71,12 @@ resource "kind_cluster" "default" {
         container_port = 31000 # Loki NodePort
         host_port      = 31000 # localhost:31000
       }
+
+      # Cloud Janitor scanner/cleanup에서 호스트 Docker daemon에 접근할 수 있도록 소켓 전달
+      extra_mounts {
+        host_path      = "/var/run/docker.sock"
+        container_path = "/var/run/docker.sock"
+      }
     }
   }
 }

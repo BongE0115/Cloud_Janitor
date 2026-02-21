@@ -16,6 +16,26 @@
     api_version: v1
 
 # -----------------------------------------------------------------------------
+# 1.5. Cloud Janitor 이미지 준비 (kind 노드 로드)
+# 클러스터 재생성 후에도 ImagePullBackOff 없이 즉시 실행되도록 보장
+# -----------------------------------------------------------------------------
+- name: Ensure Cloud Janitor image exists locally
+  ansible.builtin.command: docker image inspect cloud-janitor:latest
+  register: cloud_janitor_image_check
+  failed_when: false
+  changed_when: false
+
+- name: Build Cloud Janitor image when missing
+  ansible.builtin.command: docker build -t cloud-janitor:latest .
+  args:
+    chdir: "{{ role_path }}/../../.."
+  when: cloud_janitor_image_check.rc != 0
+
+- name: Load Cloud Janitor image into kind cluster
+  ansible.builtin.command: kind load docker-image cloud-janitor:latest --name cloud-janitor-cluster
+  changed_when: false
+
+# -----------------------------------------------------------------------------
 # 2. MySQL Database 테이블 초기화
 # MySQL은 Terraform에서 배포됨 (mysql 네임스페이스)
 # -----------------------------------------------------------------------------
@@ -253,6 +273,9 @@
               - name: runtime-code
                 configMap:
                   name: cloud-janitor-runtime-code
+              - name: docker-sock
+                hostPath:
+                  path: /var/run/docker.sock
             
             # InitContainer: Run initial scan on pod startup
             initContainers:
@@ -296,6 +319,10 @@
                     value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
                   - name: DEFAULT_CPU_REQ
                     value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                  - name: GRACE_PERIOD_MINUTES
+                    value: "{{ env_vars['GRACE_PERIOD_MINUTES'] | default('10') }}"
+                  - name: DOCKER_API_URL
+                    value: "{{ env_vars['DOCKER_API_URL'] | default('unix:///var/run/docker.sock') }}"
                   - name: WHITE_LIST_NS
                     value: "kube-system,prometheus,local-path-storage,monitoring"
                   - name: TARGET_NAMESPACES
@@ -307,6 +334,8 @@
                 volumeMounts:
                   - name: log-dir
                     mountPath: /var/log/cloud-janitor
+                  - name: docker-sock
+                    mountPath: /var/run/docker.sock
                   - name: runtime-code
                     mountPath: /app/main.py
                     subPath: main.py
@@ -391,6 +420,10 @@
                     value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
                   - name: DEFAULT_CPU_REQ
                     value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                  - name: GRACE_PERIOD_MINUTES
+                    value: "{{ env_vars['GRACE_PERIOD_MINUTES'] | default('10') }}"
+                  - name: DOCKER_API_URL
+                    value: "{{ env_vars['DOCKER_API_URL'] | default('unix:///var/run/docker.sock') }}"
                   # Run mode for initial scan
                   - name: RUN_MODE
                     value: "serve"
@@ -403,6 +436,8 @@
                 volumeMounts:
                   - name: log-dir
                     mountPath: /var/log/cloud-janitor
+                  - name: docker-sock
+                    mountPath: /var/run/docker.sock
                   - name: runtime-code
                     mountPath: /app/main.py
                     subPath: main.py
@@ -489,6 +524,9 @@
                   - name: runtime-code
                     configMap:
                       name: cloud-janitor-runtime-code
+                  - name: docker-sock
+                    hostPath:
+                      path: /var/run/docker.sock
                 containers:
                   - name: scanner
                     image: cloud-janitor:latest
@@ -532,6 +570,10 @@
                         value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
                       - name: DEFAULT_CPU_REQ
                         value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                      - name: GRACE_PERIOD_MINUTES
+                        value: "{{ env_vars['GRACE_PERIOD_MINUTES'] | default('10') }}"
+                      - name: DOCKER_API_URL
+                        value: "{{ env_vars['DOCKER_API_URL'] | default('unix:///var/run/docker.sock') }}"
                       - name: WHITE_LIST_NS
                         value: "kube-system,prometheus,local-path-storage,monitoring"
                       - name: TARGET_NAMESPACES
@@ -542,6 +584,8 @@
                       - main.py
                       - scan
                     volumeMounts:
+                      - name: docker-sock
+                        mountPath: /var/run/docker.sock
                       - name: runtime-code
                         mountPath: /app/main.py
                         subPath: main.py
@@ -555,6 +599,103 @@
                         mountPath: /app/py_Logic/metrics.py
                         subPath: metrics.py
                     
+                    resources:
+                      requests:
+                        cpu: "100m"
+                        memory: "128Mi"
+                      limits:
+                        cpu: "500m"
+                        memory: "512Mi"
+
+# -----------------------------------------------------------------------------
+# 9. Cloud Janitor Cleanup CronJob (유예기간 만료 대상 삭제)
+# -----------------------------------------------------------------------------
+- name: Create Cloud Janitor Cleanup CronJob
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: batch/v1
+      kind: CronJob
+      metadata:
+        name: cloud-janitor-cleanup
+        namespace: default
+      spec:
+        schedule: "*/1 * * * *"
+        concurrencyPolicy: Forbid
+        jobTemplate:
+          spec:
+            backoffLimit: 3
+            activeDeadlineSeconds: 300
+            template:
+              spec:
+                serviceAccountName: cloud-janitor
+                restartPolicy: OnFailure
+                volumes:
+                  - name: runtime-code
+                    configMap:
+                      name: cloud-janitor-runtime-code
+                  - name: docker-sock
+                    hostPath:
+                      path: /var/run/docker.sock
+                containers:
+                  - name: cleanup
+                    image: cloud-janitor:latest
+                    imagePullPolicy: IfNotPresent
+
+                    env:
+                      - name: LOKI_URL
+                        value: "{{ env_vars['LOKI_URL'] | default('http://loki.monitoring.svc.cluster.local:3100') }}"
+                      - name: DB_HOST
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-host
+                      - name: DB_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-user
+                      - name: DB_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-password
+                      - name: DB_NAME
+                        valueFrom:
+                          secretKeyRef:
+                            name: cloud-janitor-secret
+                            key: db-name
+                      - name: DRY_RUN
+                        value: "{{ env_vars['DRY_RUN'] | default('True') }}"
+                      - name: COST_PER_CORE_HOUR
+                        value: "{{ env_vars['COST_PER_CORE_HOUR'] | default('0.1') }}"
+                      - name: DEFAULT_CPU_REQ
+                        value: "{{ env_vars['DEFAULT_CPU_REQ'] | default('0.2') }}"
+                      - name: GRACE_PERIOD_MINUTES
+                        value: "{{ env_vars['GRACE_PERIOD_MINUTES'] | default('10') }}"
+                      - name: DOCKER_API_URL
+                        value: "{{ env_vars['DOCKER_API_URL'] | default('unix:///var/run/docker.sock') }}"
+
+                    command:
+                      - python
+                      - main.py
+                      - cleanup
+                    volumeMounts:
+                      - name: docker-sock
+                        mountPath: /var/run/docker.sock
+                      - name: runtime-code
+                        mountPath: /app/main.py
+                        subPath: main.py
+                      - name: runtime-code
+                        mountPath: /app/py_Logic/database.py
+                        subPath: database.py
+                      - name: runtime-code
+                        mountPath: /app/py_Logic/janitor_logic.py
+                        subPath: janitor_logic.py
+                      - name: runtime-code
+                        mountPath: /app/py_Logic/metrics.py
+                        subPath: metrics.py
+
                     resources:
                       requests:
                         cpu: "100m"

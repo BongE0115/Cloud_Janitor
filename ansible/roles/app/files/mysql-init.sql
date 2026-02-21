@@ -63,3 +63,26 @@ CREATE TABLE IF NOT EXISTS scan_latest_containers (
   INDEX idx_tc_cycle (tc_name, cycle_id),
   INDEX idx_updated_at (updated_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS zombie_lifecycle (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  tc_name VARCHAR(255) NOT NULL,
+  container_name VARCHAR(255) NOT NULL,
+  short_id VARCHAR(64),
+  status VARCHAR(50) NOT NULL DEFAULT 'PENDING',
+  detected_at TIMESTAMP NULL,
+  scheduled_delete_at TIMESTAMP NULL,
+  deleted_at TIMESTAMP NULL,
+  reason TEXT,
+  cpu_m DECIMAL(10, 2) NOT NULL DEFAULT 0,
+  mem_mi DECIMAL(10, 2) NOT NULL DEFAULT 0,
+  net_b DECIMAL(14, 2) NOT NULL DEFAULT 0,
+  wasted_cost DECIMAL(14, 6) NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_tc_status_sched (tc_name, status, scheduled_delete_at),
+  INDEX idx_status_detected (status, detected_at),
+  INDEX idx_container (tc_name, container_name),
+  INDEX idx_short_id (short_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

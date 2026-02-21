@@ -1,0 +1,57 @@
+{
+  "uid": "pending-alerts",
+  "title": "좀비 컨테이너 삭제 예정",
+  "ruleGroup": "CloudJanitorAlerts",
+  "folderUID": "cloud-janitor",
+  "condition": "C",
+  "for": "1m",
+  "noDataState": "OK",
+  "execErrState": "Error",
+  "labels": {
+    "team": "cloud-janitor",
+    "severity": "warning",
+    "event": "delete_scheduled"
+  },
+  "annotations": {
+    "summary": "[Cloud Janitor] 삭제 예정 컨테이너 감지",
+    "description": "현재 삭제 예정(PENDING) 컨테이너가 {{ $values.B.Value }}개 감지되었습니다."
+  },
+  "data": [
+    {
+      "refId": "A",
+      "datasourceUid": "__MYSQL_DS_UID__",
+      "relativeTimeRange": { "from": 600, "to": 0 },
+      "model": {
+        "format": "time_series",
+        "instant": true,
+        "rawSql": "SELECT NOW() AS time, COUNT(*) AS value FROM zombie_lifecycle WHERE status='PENDING';"
+      }
+    },
+    {
+      "refId": "B",
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "reduce",
+        "expression": "A",
+        "reducer": "last",
+        "settings": { "mode": "dropNN" }
+      }
+    },
+    {
+      "refId": "C",
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "threshold",
+        "expression": "B",
+        "conditions": [
+          {
+            "evaluator": { "type": "gt", "params": [0] },
+            "operator": { "type": "and" },
+            "reducer": { "type": "last" },
+            "type": "query"
+          }
+        ]
+      }
+    }
+  ]
+}
