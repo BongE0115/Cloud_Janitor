@@ -3,6 +3,8 @@ from .metrics import get_k8s_client, get_prom_val
 from .database import add_or_update_zombie  # [Comment] 통합 테이블용 함수명으로 변경
 from .database import process_cleanup # database.py에서 정의한 함수
 
+from .database import add_or_update_zombie, process_cleanup, get_db_connection
+
 # 로그 기록 방식 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("SuperJanitor")
@@ -10,6 +12,16 @@ logger = logging.getLogger("SuperJanitor")
 def run_janitor(config):
     """클러스터를 스캔하고 기준에 미달하는 좀비 파드를 찾아 삭제 대기열에 등록합니다."""
     
+    # [추가] ---------------------------------------------------------
+    # DB 연결을 한 번 시도함으로써 setup_database(테이블 생성)가 실행되도록 합니다.
+    try:
+        temp_conn = get_db_connection(config)
+        temp_conn.close()
+        logger.info("✅ 데이터베이스 및 테이블 준비 완료")
+    except Exception as e:
+        logger.error(f"❌ 데이터베이스 초기화 실패: {e}")
+    # -----------------------------------------------------------------
+
     # [Comment] 기존 metrics.py의 인증 로직을 그대로 사용
     v1 = get_k8s_client()
     if not v1:

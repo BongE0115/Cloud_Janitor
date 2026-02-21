@@ -2,8 +2,47 @@ import mysql.connector
 from datetime import datetime, timedelta, timezone  # [Comment] timezone 추가가 핵심입니다!
 
 def get_db_connection(config):
-    """[Comment] DB 연결 설정을 가져와 커넥션을 반환합니다."""
-    return mysql.connector.connect(**config['DB_CONFIG'])
+    """[Comment] DB 연결 후 자동으로 테이블 존재 여부를 체크합니다."""
+    # 1. 처음엔 DB 이름을 제외하고 연결 (DB 자체가 없을 수 있으므로)
+    base_config = config['DB_CONFIG'].copy()
+    db_name = base_config.pop('database', 'janitor_db')
+    
+    conn = mysql.connector.connect(**base_config)
+    cursor = conn.cursor()
+    
+    # 2. 아래에서 정의할 자동 생성 함수 호출
+    setup_database(cursor, db_name)
+    
+    cursor.close()
+    return conn
+
+def setup_database(cursor, db_name):
+    """[Comment] 데이터베이스와 테이블이 없으면 생성합니다."""
+    # 1. 데이터베이스 생성 및 사용 선언
+    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name}")
+    cursor.execute(f"USE {db_name}")
+
+    # 2. 테이블 생성 (에러 방지를 위해 모든 컬럼 포함)
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS zombie_lifecycle (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        namespace VARCHAR(100) NOT NULL,
+        pod_name VARCHAR(100) NOT NULL,
+        cpu_usage FLOAT DEFAULT 0,
+        mem_usage FLOAT DEFAULT 0,
+        net_usage FLOAT DEFAULT 0,
+        detected_at TIMESTAMP NULL,
+        scheduled_delete_at TIMESTAMP NULL,
+        deleted_at TIMESTAMP NULL,
+        status VARCHAR(50) DEFAULT 'PENDING',
+        reason TEXT,
+        wasted_cost FLOAT DEFAULT 0.0,
+        INDEX (pod_name),
+        INDEX (detected_at),
+        INDEX (status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """
+    cursor.execute(create_table_query)
 
 def add_or_update_zombie(pod_obj, reason, config):
     """[Phase 1] 좀비 파드를 DB에 등록하거나 유예 시간을 갱신합니다."""

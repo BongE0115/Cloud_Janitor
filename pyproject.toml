@@ -12,8 +12,10 @@ dependencies = [
     "jinja2==3.1.6",
     "kubernetes>=35.0.0",
     "markupsafe==3.0.3",
+    "mysql-connector-python>=9.6.0",
     "packaging==26.0",
     "pycparser==3.0",
+    "python-dotenv>=1.2.1",
     "pyyaml==6.0.3",
     "resolvelib==1.2.1",
 ]
