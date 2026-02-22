@@ -16,4 +16,6 @@ dependencies = [
     "pycparser==3.0",
     "pyyaml==6.0.3",
     "resolvelib==1.2.1",
+    "mysql-connector-python>=9.0.0",
+    "python-dotenv>=1.0.0",
 ]

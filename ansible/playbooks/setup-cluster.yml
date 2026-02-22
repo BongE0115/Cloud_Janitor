@@ -18,6 +18,12 @@
     env_file: "{{ playbook_dir }}/../../.env"
 
   pre_tasks:
+    - name: Ensure Python dependencies are synced (uv)
+      ansible.builtin.command: uv sync
+      args:
+        chdir: "{{ playbook_dir }}/../.."
+      changed_when: false
+
     - name: Load .env file
       ansible.builtin.set_fact:
         env_vars: "{{ dict(lookup('file', env_file).split('\n')

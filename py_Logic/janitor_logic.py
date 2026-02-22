@@ -1,65 +1,275 @@
 import logging
-from .metrics import get_k8s_client, get_prom_val
-from .database import save_billing_and_delete
+import time
+from .metrics import get_prom_val, get_docker_containers_fallback
+from .database import (
+    add_or_update_zombie,
+    mark_recovered_pendings,
+    process_cleanup,
+    save_latest_scan_snapshot,
+)
 
 # 로그 기록 방식 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("SuperJanitor")
 
+
 def run_janitor(config):
-    """클러스터를 스캔하고 기준에 미달하는 좀비 파드를 찾아 삭제합니다."""
+    """Scan TC Docker containers and find zombies based on metrics."""
     
-    # metrics.py에 정의한 함수를 통해 자동으로 인증된 K8s 클라이언트를 가져옴
-    v1 = get_k8s_client()
-    if not v1:
-        logger.error("❌ 쿠버네티스 인증 실패: .kube/config 파일이나 SA 권한을 확인하세요.")
-        return
+    prom_url = config.get('PROMETHEUS_URL', 'http://localhost:9091')
+    tc_name = config.get('TARGET_NAME', 'tc-target')
+    container_map = config.get('CONTAINER_MAP', {}) or {}
+    whitelist = {str(x).strip().lower() for x in config.get('CONTAINER_WHITELIST', []) if str(x).strip()}
+    cycle_id = int(time.time())
 
-    logger.info(f"🎯 소탕 작전 시작 (모드: {'테스트' if config['DRY_RUN'] else '실전'})")
+    def _q(value):
+        """Quote value for logfmt-like structured logs."""
+        text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{text}"'
     
+    logger.info(f"🎯 소탕 작전 시작 (TC: {tc_name}, 모드: {'테스트' if config['DRY_RUN'] else '실전'})")
+    logger.info(f"📡 Prometheus URL: {prom_url}")
+    logger.info(f"SCAN_CYCLE_START cycle={cycle_id} tc={_q(tc_name)}")
+
+    if not container_map:
+        logger.warning("SCAN_SKIPPED cycle=%s tc=%s reason=%s", cycle_id, _q(tc_name), _q("empty container_map"))
+        return
+    
+    # Get Docker containers from TC Prometheus (cAdvisor metrics)
     try:
-        # 클러스터 내의 모든 파드 목록 조회
-        all_pods = v1.list_pod_for_all_namespaces().items
+        containers = get_docker_containers_fallback(prom_url)
+        if not containers:
+            logger.warning("⚠️ No containers found from Prometheus")
+            containers = []
     except Exception as e:
-        logger.error(f"❌ 파드 목록 조회 중 오류 발생: {e}")
-        return
+        logger.error(f"❌ Error getting containers from Prometheus: {e}")
+        containers = []
 
-    # 화면 출력용 헤더 (표 형식)
-    print(f"\n{'NAMESPACE':<15} {'POD NAME':<35} {'CPU(m)':>8} {'MEM(Mi)':>8} {'NET(B)':>8} {'DECISION'}")
-    print("-" * 115)
+    # TC-reported container_map is the source of truth for "which containers exist".
+    # cAdvisor metrics are used as supplemental values.
+    metrics_by_id = {}
+    for item in containers:
+        sid = item.get("short_id")
+        if sid:
+            metrics_by_id[sid] = item
 
-    for pod in all_pods:
-        ns, name = pod.metadata.namespace, pod.metadata.name
-        
-        if "mysql" in name:
-            print(f"🛡️ [SKIP] {name} 은 핵심 인프라(DB)이므로 건너뜁니다.")
+    merged_containers = []
+    for sid, meta in container_map.items():
+        metric = metrics_by_id.get(sid, {})
+        merged_containers.append({
+            "name": metric.get("name") or meta.get("name") or sid,
+            "short_id": sid,
+            "cpu": float(metric.get("cpu", 0.0)),
+            "mem": float(metric.get("mem", 0.0)),
+            "net": float(metric.get("net", 0.0)),
+            "type": metric.get("type") or meta.get("type") or "unknown",
+            "zombie_type": metric.get("zombie_type") or meta.get("zombie_type") or "",
+        })
+
+    # If map is unexpectedly empty, fallback to metrics-only path.
+    containers = merged_containers if merged_containers else containers
+    
+    # Print header for output
+    print(f"\n{'TC/CONTAINER':<38} {'CPU(m)':>10} {'MEM(Mi)':>10} {'NET(B)':>10} {'TYPE':<15} {'DECISION':<30} {'REASON'}")
+    print("-" * 150)
+    
+    zombie_count = 0
+    candidate_count = 0
+    active_count = 0
+    safe_count = 0
+    snapshot_rows = []
+    zombie_container_names = set()
+    
+    for container in containers:
+        name = container['name']
+        short_id = container.get('short_id')
+        cpu_val = container['cpu']
+        mem_val = container['mem']
+        net_val = container['net']
+        app_type = container.get('type', '')
+        zombie_type = container.get('zombie_type', '')
+        type_str = f"{app_type}/{zombie_type}" if zombie_type else app_type
+        display_name = f"{tc_name}/{name}"
+        alias = container_map.get(short_id, {}) if short_id else {}
+        alias_name = alias.get('name') if isinstance(alias, dict) else None
+        if alias_name:
+            display_name = f"{tc_name}/{alias_name}"
+            if app_type == 'unknown':
+                app_type = alias.get('type', app_type)
+                zombie_type = alias.get('zombie_type', zombie_type)
+                type_str = f"{app_type}/{zombie_type}" if zombie_type else app_type
+        if not app_type and short_id:
+            display_name = f"{tc_name}/{short_id}"
+
+        # TC-side whitelist: do not treat system containers as zombie/candidate.
+        effective_name = (alias_name or name or "").lower()
+        if effective_name in whitelist:
+            decision = "🛡️ SAFE (WhiteList)"
+            reason = "container whitelist"
+            safe_count += 1
+            snapshot_rows.append({
+                "container_name": alias_name or name,
+                "tc_container": display_name,
+                "cpu_m": cpu_val,
+                "mem_mi": mem_val,
+                "net_b": net_val,
+                "ctype": type_str or "unknown",
+                "decision": "SAFE_WHITELIST",
+                "reason": reason,
+            })
+            print(f"{display_name:<38} {cpu_val:>10.2f} {mem_val:>10.2f} {net_val:>10.2f} {type_str:<15} {decision:<30} {reason}")
+            logger.info(
+                "SCAN_CONTAINER cycle=%s tc=%s container=%s tc_container=%s cpu_m=%.2f mem_mi=%.2f net_b=%.2f ctype=%s decision=%s reason=%s",
+                cycle_id,
+                _q(tc_name),
+                _q(alias_name or name),
+                _q(display_name),
+                cpu_val,
+                mem_val,
+                net_val,
+                _q(type_str or "unknown"),
+                _q("SAFE_WHITELIST"),
+                _q(reason),
+            )
             continue
-        # 프로메테우스 쿼리 준비
-        cpu_q = f'sum(rate(container_cpu_usage_seconds_total{{pod="{name}",namespace="{ns}"}}[{config["TIME_WINDOW_CPU"]}])) * 1000'
-        mem_q = f'sum(container_memory_working_set_bytes{{pod="{name}",namespace="{ns}"}}) / 1024 / 1024'
-        net_q = f'sum(rate(container_network_receive_bytes_total{{pod="{name}",namespace="{ns}"}}[{config["TIME_WINDOW_NET"]}]))'
-
-        # 지표 데이터 수집
-        cpu_val = get_prom_val(config['PROMETHEUS_URL'], cpu_q)
-        mem_val = get_prom_val(config['PROMETHEUS_URL'], mem_q)
-        net_val = get_prom_val(config['PROMETHEUS_URL'], net_q)
-
-        # 판정 단계
-        if ns in config['WHITE_LIST_NS']:
-            decision = "✅ SAFE (WhiteList)"
-        elif ns in config['TARGET_NAMESPACES'] and cpu_val < config['LIMIT_CPU_M'] and net_val < config['LIMIT_NET_B']:
-            decision = "🚨 ZOMBIE DETECTED"
-        else:
-            decision = "👍 ACTIVE"
-
-        # 결과 한 줄 출력
-        print(f"{ns:<15} {name[:35]:<35} {cpu_val:>8.2f} {mem_val:>8.2f} {net_val:>8.2f} {decision}")
-
-        # 좀비로 판정될 경우 DB 저장 및 실제 삭제 수행
-        if decision == "🚨 ZOMBIE DETECTED" and not config['DRY_RUN']:
-            success, val, sec = save_billing_and_delete(v1, pod, config)
-            if success:
-                logger.info(f"💰 [DB 기록 완료] {name}: ${val:.5f} (생존: {sec}초)")
-                logger.info(f"💥 [삭제 성공] {ns}/{name}")
+        
+        # Decision logic for TC Docker containers
+        # Zombie: app-type=zombie label AND low CPU AND low network
+        if app_type == 'zombie':
+            if cpu_val < config['LIMIT_CPU_M'] and net_val < config['LIMIT_NET_B']:
+                decision = "🚨 ZOMBIE DETECTED"
+                reason = f"label=zombie && cpu<{config['LIMIT_CPU_M']} && net<{config['LIMIT_NET_B']}"
+                zombie_count += 1
             else:
-                logger.error(f"❌ 작업 중 오류 발생: {val}")
+                decision = "👍 ACTIVE (zombie but active)"
+                reason = f"label=zombie but cpu/net above threshold"
+                active_count += 1
+        elif app_type == 'active':
+            decision = "✅ ACTIVE (normal app)"
+            reason = "label=active"
+            active_count += 1
+        else:
+            # Unknown containers - check by metrics only
+            if cpu_val < config['LIMIT_CPU_M'] and net_val < config['LIMIT_NET_B']:
+                decision = "🔍 CANDIDATE (low metrics)"
+                reason = f"cpu<{config['LIMIT_CPU_M']} && net<{config['LIMIT_NET_B']}"
+                candidate_count += 1
+            else:
+                decision = "👍 ACTIVE"
+                reason = "metrics above threshold"
+                active_count += 1
+        
+        # Print result line (this goes to Loki)
+        snapshot_rows.append({
+            "container_name": alias_name or name,
+            "tc_container": display_name,
+            "cpu_m": cpu_val,
+            "mem_mi": mem_val,
+            "net_b": net_val,
+            "ctype": type_str or "unknown",
+            "decision": decision,
+            "reason": reason,
+        })
+        print(f"{display_name:<38} {cpu_val:>10.2f} {mem_val:>10.2f} {net_val:>10.2f} {type_str:<15} {decision:<30} {reason}")
+        logger.info(
+            "SCAN_CONTAINER cycle=%s tc=%s container=%s tc_container=%s cpu_m=%.2f mem_mi=%.2f net_b=%.2f ctype=%s decision=%s reason=%s",
+            cycle_id,
+            _q(tc_name),
+            _q(alias_name or name),
+            _q(display_name),
+            cpu_val,
+            mem_val,
+            net_val,
+            _q(type_str or "unknown"),
+            _q(decision),
+            _q(reason),
+        )
+        
+        # Register pending lifecycle row; actual deletion is handled by cleanup job.
+        if decision == "🚨 ZOMBIE DETECTED" and not config['DRY_RUN']:
+            pending_name = alias_name or name
+            zombie_container_names.add(str(pending_name))
+            lifecycle_saved = add_or_update_zombie(
+                tc_name=tc_name,
+                container_name=pending_name,
+                short_id=short_id,
+                reason=reason,
+                cpu_m=cpu_val,
+                mem_mi=mem_val,
+                net_b=net_val,
+                config=config,
+            )
+            if lifecycle_saved:
+                logger.info(
+                    "LIFECYCLE_PENDING tc=%s container=%s short_id=%s",
+                    _q(tc_name),
+                    _q(pending_name),
+                    _q(short_id or ""),
+                )
+            else:
+                logger.error(
+                    "LIFECYCLE_PENDING_FAILED tc=%s container=%s short_id=%s",
+                    _q(tc_name),
+                    _q(pending_name),
+                    _q(short_id or ""),
+                )
+
+    # If a previously pending container is no longer zombie in this scan, cancel deletion.
+    if not config['DRY_RUN']:
+        recovered_count = mark_recovered_pendings(tc_name, zombie_container_names, config)
+        if recovered_count > 0:
+            logger.info(
+                "LIFECYCLE_RECOVERED tc=%s count=%s",
+                _q(tc_name),
+                recovered_count,
+            )
+    
+    print("-" * 150)
+    logger.info(f"📊 Summary: {zombie_count} zombies, {candidate_count} candidates, {active_count} active, {safe_count} safe")
+    logger.info(
+        f"SUMMARY_METRICS zombie={zombie_count} candidate={candidate_count} active={active_count} safe={safe_count}"
+    )
+    logger.info(
+        "SCAN_CYCLE_END cycle=%s tc=%s zombie=%s candidate=%s active=%s safe=%s",
+        cycle_id,
+        _q(tc_name),
+        zombie_count,
+        candidate_count,
+        active_count,
+        safe_count,
+    )
+
+    try:
+        save_latest_scan_snapshot(
+            tc_name=tc_name,
+            cycle_id=cycle_id,
+            summary={
+                "zombie": zombie_count,
+                "candidate": candidate_count,
+                "active": active_count,
+                "safe": safe_count,
+            },
+            rows=snapshot_rows,
+        )
+    except Exception as e:
+        logger.error("SNAPSHOT_SAVE_FAILED cycle=%s tc=%s error=%s", cycle_id, _q(tc_name), _q(str(e)))
+
+
+def run_cleanup(config):
+    """Delete due pending lifecycle rows and write status back to DB."""
+    tc_name = config.get('TARGET_NAME') or ''
+    logger.info("🧹 Cleanup cycle start (TC: %s)", tc_name if tc_name else "all")
+
+    try:
+        stats = process_cleanup(config)
+        logger.info(
+            "CLEANUP_SUMMARY tc=%s total=%s deleted=%s already_missing=%s failed=%s dry_run=%s",
+            tc_name if tc_name else "all",
+            stats.get("total", 0),
+            stats.get("deleted", 0),
+            stats.get("already_missing", 0),
+            stats.get("failed", 0),
+            stats.get("dry_run", False),
+        )
+    except Exception as e:
+        logger.error("CLEANUP_FAILED tc=%s error=%s", tc_name if tc_name else "all", str(e))

@@ -1,7 +1,7 @@
 {
   "id": null,
   "uid": "cloud-janitor-dashboard",
-  "title": "Cloud Janitor - logs dashboard",
+  "title": "Cloud Janitor - dashboard",
   "refresh": "5s",
   "schemaVersion": 39,
   "templating": {
@@ -10,25 +10,27 @@
         "name": "namespace",
         "type": "query",
         "label": "Namespace",
-        "datasource": { "type": "loki", "uid": "Loki" },
+        "datasource": { "type": "loki", "uid": "loki-main" },
         "definition": "label_values(namespace)",
         "query": "label_values(namespace)",
         "refresh": 2,
         "includeAll": true,
-        "current": { "text": "default", "value": "default" }
+        "allValue": ".*",
+        "current": { "text": "All", "value": ".*" }
       }
     ]
   },
   "panels": [
     {
       "type": "stat",
-      "title": "잡아낸 좀비 숫자",
+      "title": "현재 좀비 수",
       "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
-      "datasource": { "type": "loki", "uid": "Loki" },
+      "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
-          "expr": "count(count_over_time({namespace=~\"$namespace\", pod=~\"zombie.*\"} [$__range]))",
-          "refId": "A"
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT COALESCE(SUM(zombie_count), 0) AS value FROM scan_latest_summary;"
         }
       ],
       "fieldConfig": {
@@ -37,31 +39,14 @@
     },
     {
       "type": "stat",
-      "title": "절약된 예상 비용 (Total Savings)",
+      "title": "현재 후보 수",
       "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
-      "datasource": { "type": "loki", "uid": "Loki" },
+      "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
-          "expr": "sum(count_over_time({namespace=~\"$namespace\", pod=~\"zombie.*\"} [$__range])) * 0.5",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decusd",
-          "color": { "mode": "fixed", "fixedColor": "green" }
-        }
-      }
-    },
-    {
-      "type": "stat",
-      "title": "좀비 파드 후보 (현재 작동 중)",
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "targets": [
-        {
-          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod=~\"candidate.*\"})",
-          "refId": "A"
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT COALESCE(SUM(candidate_count), 0) AS value FROM scan_latest_summary;"
         }
       ],
       "fieldConfig": {
@@ -69,34 +54,61 @@
       }
     },
     {
-      "type": "timeseries",
-      "title": "관리 중인 Pod 개수 (Zombie / Candidate / Normal)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "type": "stat",
+      "title": "현재 절감 추정 비용",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
-          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod=~\"zombie.*\"})",
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT ROUND(COALESCE(SUM(zombie_count), 0) * 0.5, 2) AS value FROM scan_latest_summary;"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "감지 추이 (Zombie / Candidate / Active)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "datasource": { "type": "loki", "uid": "loki-main" },
+      "timeFrom": "1h",
+      "interval": "1m",
+      "maxDataPoints": 60,
+      "targets": [
+        {
+          "expr": "max(last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\", namespace=~\"$namespace\"} |= \"SCAN_CYCLE_END\" | logfmt | unwrap zombie [1m]))",
           "legendFormat": "Zombie",
           "refId": "A"
         },
         {
-          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod=~\"candidate.*\"})",
+          "expr": "max(last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\", namespace=~\"$namespace\"} |= \"SCAN_CYCLE_END\" | logfmt | unwrap candidate [1m]))",
           "legendFormat": "Candidate",
           "refId": "B"
         },
         {
-          "expr": "count(kube_pod_status_phase{namespace=~\"$namespace\", phase=\"Running\", pod!~\"zombie.*|candidate.*\"})",
-          "legendFormat": "Normal",
+          "expr": "max(last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\", namespace=~\"$namespace\"} |= \"SCAN_CYCLE_END\" | logfmt | unwrap active [1m]))",
+          "legendFormat": "Active",
           "refId": "C"
         }
       ],
       "fieldConfig": {
         "defaults": {
+          "min": 0,
           "custom": {
             "drawStyle": "bars",
+            "barWidthFactor": 1,
+            "barAlignment": 0,
             "fillOpacity": 100,
             "lineWidth": 1,
-            "gradientMode": "none",
+            "pointSize": 0,
+            "showPoints": "never",
+            "spanNulls": false,
             "stacking": { "mode": "normal", "group": "A" }
           }
         }
@@ -104,35 +116,70 @@
     },
     {
       "type": "timeseries",
-      "title": "네트워크 트래픽양 (Pod Network I/O)",
+      "title": "네트워크 트래픽 (TC 전체)",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "datasource": { "type": "prometheus", "uid": "prometheus-main" },
       "targets": [
         {
-          "expr": "sum by (pod) (irate(container_network_receive_bytes_total{namespace=~\"$namespace\"}[5m]))",
-          "legendFormat": "{{pod}} IN",
+          "expr": "sum by (interface) (irate(container_network_receive_bytes_total{interface!=\"lo\"}[5m]))",
+          "legendFormat": "{{interface}} IN",
           "refId": "A"
         },
         {
-          "expr": "sum by (pod) (irate(container_network_transmit_bytes_total{namespace=~\"$namespace\"}[5m]))",
-          "legendFormat": "{{pod}} OUT",
+          "expr": "sum by (interface) (irate(container_network_transmit_bytes_total{interface!=\"lo\"}[5m]))",
+          "legendFormat": "{{interface}} OUT",
           "refId": "B"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "binbps" } }
     },
     {
-      "type": "logs",
-      "title": "Janitor 활동 로그",
+      "type": "table",
+      "title": "현재 감지 컨테이너 상태 (Latest Scan)",
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
-      "datasource": { "type": "loki", "uid": "Loki" },
+      "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
-          "expr": "{namespace=~\"$namespace\"} |~ \"zombie|deleted|cleanup\"",
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT c.tc_name, c.tc_container, ROUND(c.cpu_m, 2) AS cpu_m, ROUND(c.mem_mi, 2) AS mem_mi, ROUND(c.net_b, 2) AS net_b, c.ctype, c.decision, c.reason FROM scan_latest_containers c JOIN scan_latest_summary s ON s.tc_name = c.tc_name AND s.cycle_id = c.cycle_id ORDER BY c.tc_name, c.tc_container;"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "tc_container",
+            "desc": false
+          }
+        ]
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Janitor API 로그 (cloud-janitor)",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "loki", "uid": "loki-main" },
+      "targets": [
+        {
+          "expr": "{app=\"cloud-janitor\", namespace=~\"$namespace\"} != \"GET /ready\" != \"GET /health\"",
           "refId": "A"
         }
       ],
-      "options": { "showTime": true, "enableLogDetails": true }
+      "options": { "showTime": true, "enableLogDetails": true, "sortOrder": "Ascending" }
+    },
+    {
+      "type": "logs",
+      "title": "Janitor Scanner 로그 (cloud-janitor-scanner)",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "loki", "uid": "loki-main" },
+      "targets": [
+        {
+          "expr": "{app=\"cloud-janitor-scanner\", namespace=~\"$namespace\"}",
+          "refId": "A"
+        }
+      ],
+      "options": { "showTime": true, "enableLogDetails": true, "sortOrder": "Ascending" }
     }
   ]
 }

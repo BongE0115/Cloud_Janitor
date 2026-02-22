@@ -1,99 +1,13 @@
 # =============================================================================
 # Helm Releases — 인프라 레이어
-# Prometheus + Grafana, Loki 모두 Terraform에서 설치/관리
+# Prometheus는 Target Cluster에서 별도로 실행되므로
+# Management Cluster에서는 Loki만 설치/관리
+# Grafana와 Cloud Janitor는 Ansible에서 배포
 # =============================================================================
 
-# ---------- Prometheus + Grafana (kube-prometheus-stack) ---------------------
-
-resource "helm_release" "prometheus_stack" {
-  name       = "kube-prometheus-stack"
-  repository = "https://prometheus-community.github.io/helm-charts"
-  chart      = "kube-prometheus-stack"
-  namespace  = kubernetes_namespace.monitoring.metadata[0].name
-
-  timeout         = 900 # 15분
-  wait            = true
-  cleanup_on_fail = true
-
-  # Grafana 관리자 비밀번호 (TF_VAR_grafana_password 환경변수로 전달)
-  set_sensitive {
-    name  = "grafana.adminPassword"
-    value = local.grafana_password
-  }
-
-  # Grafana NodePort (localhost:3000)
-  set {
-    name  = "grafana.service.type"
-    value = "NodePort"
-  }
-  set {
-    name  = "grafana.service.nodePort"
-    value = "30080"
-  }
-
-  set {
-    name  = "grafana.assertNoLeakedSecrets"
-    value = "false"
-  }
-
-  # SMTP 활성화
-  set {
-    name  = "grafana.grafana\\.ini.smtp.enabled"
-    value = "true"
-  }
-
-  # Gmail 호스트 설정
-  set {
-    name  = "grafana.grafana\\.ini.smtp.host"
-    value = "smtp.gmail.com:587"
-  }
-
-  # 발송 계정 이메일
-  set {
-    name  = "grafana.grafana\\.ini.smtp.user"
-    value = "moanuna03@tukorea.ac.kr"
-  }
-
-  # 앱 비밀번호 (16자리, set_sensitive 사용 추천)
-  set_sensitive {
-    name  = "grafana.grafana\\.ini.smtp.password"
-    value = local.smtp_password
-  }
-
-  # 발송인 주소 및 이름
-  set {
-    name  = "grafana.grafana\\.ini.smtp.from_address"
-    value = "moanuna03@tukorea.ac.kr"
-  }
-  set {
-    name  = "grafana.grafana\\.ini.smtp.from_name"
-    value = "Cloud-Janitor-Alert"
-  }
-
-  # 보안 정책 (MandatoryStartTLS)
-  set {
-    name  = "grafana.grafana\\.ini.smtp.startTLS_policy"
-    value = "MandatoryStartTLS"
-  }
-
-  # sidecar datasource 완전 비활성화 → Ansible에서 직접 관리
-  set {
-    name  = "grafana.sidecar.datasources.enabled"
-    value = "false"
-  }
-
-  # Prometheus NodePort (localhost:9090)
-  set {
-    name  = "prometheus.service.type"
-    value = "NodePort"
-  }
-  set {
-    name  = "prometheus.service.nodePort"
-    value = "30090"
-  }
-
-  depends_on = [kubernetes_namespace.monitoring]
-}
+# NOTE: Prometheus는 제거됨
+# Target Cluster의 Prometheus API를 Cloud Janitor가 직접 호출하므로
+# Management Cluster에는 Prometheus가 필요 없음
 
 # ---------- Loki Stack (로그 수집) ------------------------------------------
 
@@ -108,6 +22,24 @@ resource "helm_release" "loki_stack" {
   set {
     name  = "loki.image.tag"
     value = "2.9.10"
+  }
+  set {
+    name  = "loki.service.type"
+    value = "NodePort"
+  }
+  set {
+    name  = "loki.service.nodePort"
+    value = "31000"
+  }
+
+  # Enable CJ-side Promtail for cloud-janitor/cloud-janitor-scanner pod logs
+  set {
+    name  = "promtail.enabled"
+    value = "true"
+  }
+  set {
+    name  = "promtail.serviceMonitor.enabled"
+    value = "false"
   }
 
   wait            = true

@@ -1,15 +1,20 @@
 {
   "uid": "deleted-alerts",
-  "title": "좀비 파드 삭제 완료",
+  "title": "좀비 컨테이너 삭제 완료",
   "ruleGroup": "CloudJanitorAlerts",
   "folderUID": "cloud-janitor",
   "condition": "C",
   "for": "30s",
   "noDataState": "OK",
-  "execErrState": "OK",
+  "execErrState": "Error",
+  "labels": {
+    "team": "cloud-janitor",
+    "severity": "info",
+    "event": "delete_completed"
+  },
   "annotations": {
-    "summary": "[Cloud Janitor] 좀비 파드 삭제 완료",
-    "description": "{{ $values.B.Value }}개의 좀비 파드가 삭제되었습니다.\n\n※ 자세한 내용은 그라파나 대시보드를 참조하세요."
+    "summary": "[Cloud Janitor] 삭제 완료",
+    "description": "최근 10분 내 삭제 완료(DELETED) 컨테이너가 {{ $values.B.Value }}개 처리되었습니다."
   },
   "data": [
     {
@@ -19,7 +24,7 @@
       "model": {
         "format": "time_series",
         "instant": true,
-        "rawSql": "SELECT NOW() AS time, COUNT(*) AS value FROM zombie_lifecycle WHERE status='DELETED' AND deleted_at IS NOT NULL AND deleted_at >= NOW() - INTERVAL 10 MINUTE;"
+        "rawSql": "SELECT NOW() AS time, COUNT(*) AS value FROM zombie_lifecycle WHERE status='DELETED' AND deleted_at IS NOT NULL AND deleted_at >= UTC_TIMESTAMP() - INTERVAL 10 MINUTE;"
       }
     },
     {

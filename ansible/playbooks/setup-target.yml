@@ -1,0 +1,30 @@
+---
+# =============================================================================
+# Target Cluster Setup Playbook
+# Legacy 플레이북 (현재 권장 경로: tc connect)
+# - 과거: Target Prometheus URL 기반 Grafana 연동
+# - 현재: tc connect가 등록/데이터소스 갱신을 처리
+# =============================================================================
+
+- name: Setup Target Cluster Integration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    kubeconfig: "{{ playbook_dir }}/../../terraform/cloud-janitor-cluster-config"
+
+  tasks:
+    - name: Verify kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ kubeconfig }}"
+      register: kubeconfig_stat
+
+    - name: Fail if kubeconfig does not exist
+      ansible.builtin.fail:
+        msg: "kubeconfig 파일을 찾을 수 없습니다: {{ kubeconfig }}"
+      when: not kubeconfig_stat.stat.exists
+
+    - name: Display guidance
+      ansible.builtin.debug:
+        msg: "setup-target.yml은 더 이상 Target Prometheus URL을 사용하지 않습니다. 'tc connect -a <CJ_HOST> [--prom-url ...]'를 사용하세요."

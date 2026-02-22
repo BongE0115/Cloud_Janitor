@@ -50,20 +50,32 @@ resource "kind_cluster" "default" {
     node {
       role = "control-plane"
 
-      # Grafana (3000), Prometheus (9090), MySQL (3306) 포트 노출
+      # Grafana (3000), MySQL (3306) 포트 노출
+      # Prometheus는 Target Cluster에서 별도로 실행되므로 포트 매핑 제거
       extra_port_mappings {
         container_port = 30080 # Grafana NodePort
         host_port      = 3000  # localhost:3000
       }
 
       extra_port_mappings {
-        container_port = 30090 # Prometheus NodePort
-        host_port      = 9090  # localhost:9090
+        container_port = 30306 # MySQL NodePort
+        host_port      = 3306  # localhost:3306
       }
 
       extra_port_mappings {
-        container_port = 30306 # MySQL NodePort
-        host_port      = 3306  # localhost:3306
+        container_port = 30800 # Cloud Janitor NodePort
+        host_port      = 30800 # localhost:30800
+      }
+
+      extra_port_mappings {
+        container_port = 31000 # Loki NodePort
+        host_port      = 31000 # localhost:31000
+      }
+
+      # Cloud Janitor scanner/cleanup에서 호스트 Docker daemon에 접근할 수 있도록 소켓 전달
+      extra_mounts {
+        host_path      = "/var/run/docker.sock"
+        container_path = "/var/run/docker.sock"
       }
     }
   }
