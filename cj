@@ -598,37 +598,48 @@ cmd_install() {
     echo "=========================================="
     echo ""
 
-    # 쉘 타입 자동 감지
-    SHELL_TYPE=""
-    RC_FILE=""
+    # 로그인 쉘 기준으로 RC 파일 선택
+    local shell_name
+    local rc_file
+    local profile_file
+    shell_name="$(basename "${SHELL:-bash}")"
 
-    if [ -n "$ZSH_VERSION" ]; then
-        SHELL_TYPE="zsh"
-        RC_FILE="$HOME/.zshrc"
-        log_info "감지된 쉘: zsh"
-    elif [ -n "$BASH_VERSION" ]; then
-        SHELL_TYPE="bash"
-        RC_FILE="$HOME/.bashrc"
-        log_info "감지된 쉘: bash"
-    else
-        SHELL_TYPE="bash"
-        RC_FILE="$HOME/.bashrc"
-        log_warning "쉘 타입을 감지할 수 없습니다. bash를 기본으로 사용합니다."
-    fi
+    case "$shell_name" in
+        zsh)
+            rc_file="$HOME/.zshrc"
+            profile_file="$HOME/.zprofile"
+            log_info "감지된 쉘: zsh"
+            ;;
+        bash)
+            rc_file="$HOME/.bashrc"
+            profile_file="$HOME/.bash_profile"
+            log_info "감지된 쉘: bash"
+            ;;
+        *)
+            rc_file="$HOME/.profile"
+            profile_file="$HOME/.profile"
+            log_warning "쉘 타입을 감지할 수 없습니다. profile을 기본으로 사용합니다."
+            ;;
+    esac
 
     echo ""
 
     # 1) 시스템 PATH에 심볼릭 링크 생성 시도
     log_info "시스템 PATH에 심볼릭 링크 생성 중..."
 
-    LINK_LOCATIONS=(
+    mkdir -p "$HOME/.local/bin"
+
+    local link_locations=(
+        "/opt/homebrew/bin/cj"
         "/usr/local/bin/cj"
         "$HOME/.local/bin/cj"
     )
 
-    LINK_SUCCESS=false
+    local link_success=false
 
-    for link_path in "${LINK_LOCATIONS[@]}"; do
+    local link_path
+    for link_path in "${link_locations[@]}"; do
+        local link_dir
         link_dir=$(dirname "$link_path")
 
         if [ ! -d "$link_dir" ]; then
@@ -639,41 +650,51 @@ cmd_install() {
             continue
         fi
 
-        if [ -e "$link_path" ]; then
-            rm -f "$link_path"
+        if [ -e "$link_path" ] && [ ! -L "$link_path" ]; then
+            continue
         fi
 
-        ln -s "$CJ_CLI" "$link_path"
+        rm -f "$link_path" 2>/dev/null || true
+        ln -s "$CJ_CLI" "$link_path" || continue
         log_success "심볼릭 링크 생성: $link_path → $CJ_CLI"
-        LINK_SUCCESS=true
+        link_success=true
         break
     done
 
-    if [ "$LINK_SUCCESS" = false ]; then
+    if [ "$link_success" = false ]; then
         log_warning "시스템 PATH에 심볼릭 링크를 생성할 수 없습니다."
     fi
 
     echo ""
 
     # 2) RC 파일에 PATH 추가
-    log_info "$RC_FILE에 CJ_HOME과 PATH 추가 중..."
+    log_info "쉘 설정 파일에 CJ_HOME과 PATH 추가 중..."
 
-    if [ ! -f "$RC_FILE" ]; then
-        log_warning "$RC_FILE 파일이 없습니다. 생성합니다."
-        touch "$RC_FILE"
-    fi
+    touch "$rc_file"
+    touch "$profile_file"
 
-    # Cloud Janitor CLI 추가 (이미 있으면 무시)
-    if ! grep -q "Cloud Janitor CLI" "$RC_FILE" 2>/dev/null; then
-        cat >> "$RC_FILE" << EOF
+    if ! grep -q "export CJ_HOME=" "$rc_file" 2>/dev/null; then
+        cat >> "$rc_file" << EOF
 
 # Cloud Janitor CLI
 export CJ_HOME="$CJ_HOME"
-export PATH="\$PATH:\$CJ_HOME"
+export PATH="\$HOME/.local/bin:\$CJ_HOME:\$PATH"
 EOF
-        log_success "$RC_FILE에 추가 완료"
+        log_success "$rc_file에 추가 완료"
     else
-        log_info "$RC_FILE에 이미 Cloud Janitor CLI 설정이 있습니다. (덮어쓰지 않음)"
+        log_info "$rc_file에 이미 CJ_HOME 설정이 있습니다. (덮어쓰지 않음)"
+    fi
+
+    if [ "$profile_file" != "$rc_file" ] && ! grep -q "export CJ_HOME=" "$profile_file" 2>/dev/null; then
+        cat >> "$profile_file" << EOF
+
+# Cloud Janitor CLI
+export CJ_HOME="$CJ_HOME"
+export PATH="\$HOME/.local/bin:\$CJ_HOME:\$PATH"
+EOF
+        log_success "$profile_file에 추가 완료"
+    elif [ "$profile_file" != "$rc_file" ]; then
+        log_info "$profile_file에 이미 CJ_HOME 설정이 있습니다. (덮어쓰지 않음)"
     fi
 
     # 설치 완료 메시지

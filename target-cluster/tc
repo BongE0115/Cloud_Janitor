@@ -270,8 +270,10 @@ cmd_install() {
 
     touch "$rc_file"
     touch "$profile_file"
+    mkdir -p "$HOME/.local/bin"
 
     local link_locations=(
+        "/opt/homebrew/bin/tc"
         "/usr/local/bin/tc"
         "$HOME/.local/bin/tc"
     )
@@ -304,14 +306,14 @@ cmd_install() {
     if ! grep -q "TC_HOME" "$rc_file" 2>/dev/null; then
         cat >> "$rc_file" << EOF
 export TC_HOME="$TC_DIR"
-export PATH="\$TC_HOME:\$PATH"
+export PATH="\$HOME/.local/bin:\$TC_HOME:\$PATH"
 EOF
     fi
 
     if ! grep -q "TC_HOME" "$profile_file" 2>/dev/null; then
         cat >> "$profile_file" << EOF
 export TC_HOME="$TC_DIR"
-export PATH="\$TC_HOME:\$PATH"
+export PATH="\$HOME/.local/bin:\$TC_HOME:\$PATH"
 EOF
     fi
 

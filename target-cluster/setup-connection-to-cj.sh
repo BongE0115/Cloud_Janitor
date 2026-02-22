@@ -520,7 +520,9 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
     log_info "TC Promtail Loki URL 설정: $LOKI_PUSH_URL"
     if [ -f "$TC_ENV_FILE" ]; then
         if grep -q '^LOKI_URL=' "$TC_ENV_FILE"; then
-            sed -i "s|^LOKI_URL=.*|LOKI_URL=$LOKI_PUSH_URL|" "$TC_ENV_FILE"
+            escaped_loki_url=$(printf '%s' "$LOKI_PUSH_URL" | sed 's/[&|]/\\&/g')
+            sed -i.bak "s|^LOKI_URL=.*|LOKI_URL=$escaped_loki_url|" "$TC_ENV_FILE"
+            rm -f "${TC_ENV_FILE}.bak"
         else
             echo "LOKI_URL=$LOKI_PUSH_URL" >> "$TC_ENV_FILE"
         fi
