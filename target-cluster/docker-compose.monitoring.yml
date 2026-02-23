@@ -1,0 +1,90 @@
+# =============================================================================
+# Target Cluster Monitoring Bridge Compose
+# TC -> CJ 연동에 필요한 모니터링/로그 브리지 컨테이너
+# =============================================================================
+
+services:
+  # -----------------------------------------------------------------------------
+  # Prometheus - Target Cluster 메트릭 수집
+  # -----------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: target-prometheus
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_HOST_PORT:-9091}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - target-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # -----------------------------------------------------------------------------
+  # cAdvisor - Docker 컨테이너 메트릭 exporter
+  # -----------------------------------------------------------------------------
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    privileged: true
+    command:
+      - --store_container_labels=true
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - target-network
+    devices:
+      - /dev/kmsg
+
+  # -----------------------------------------------------------------------------
+  # Promtail - TC 로그를 CJ Loki로 전송
+  # -----------------------------------------------------------------------------
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: promtail
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/promtail/promtail-config.yaml
+      - -config.expand-env=true
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/promtail-config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-data:/var/lib/promtail
+    environment:
+      - LOKI_URL=${LOKI_URL}
+      - TC_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME}
+      - DOCKER_API_VERSION=1.44
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - target-network
+
+volumes:
+  prometheus-data:
+    driver: local
+  promtail-data:
+    driver: local
+
+networks:
+  target-network:
+    driver: bridge
+    name: tc-network
+    external: true

@@ -171,6 +171,8 @@
         database.py: "{{ lookup('file', role_path + '/../../../py_Logic/database.py') }}"
         janitor_logic.py: "{{ lookup('file', role_path + '/../../../py_Logic/janitor_logic.py') }}"
         metrics.py: "{{ lookup('file', role_path + '/../../../py_Logic/metrics.py') }}"
+        containers.html: "{{ lookup('file', role_path + '/../../../templates/containers.html') }}"
+        zombies.html: "{{ lookup('file', role_path + '/../../../templates/zombies.html') }}"
 
 # -----------------------------------------------------------------------------
 # 4. Cloud Janitor Secret 생성 (MySQL 비밀번호)
@@ -348,6 +350,12 @@
                   - name: runtime-code
                     mountPath: /app/py_Logic/metrics.py
                     subPath: metrics.py
+                  - name: runtime-code
+                    mountPath: /app/containers.html
+                    subPath: containers.html
+                  - name: runtime-code
+                    mountPath: /app/zombies.html
+                    subPath: zombies.html
                 resources:
                   requests:
                     cpu: "100m"
@@ -450,6 +458,12 @@
                   - name: runtime-code
                     mountPath: /app/py_Logic/metrics.py
                     subPath: metrics.py
+                  - name: runtime-code
+                    mountPath: /app/containers.html
+                    subPath: containers.html
+                  - name: runtime-code
+                    mountPath: /app/zombies.html
+                    subPath: zombies.html
                 
                 resources:
                   requests:
@@ -598,6 +612,12 @@
                       - name: runtime-code
                         mountPath: /app/py_Logic/metrics.py
                         subPath: metrics.py
+                      - name: runtime-code
+                        mountPath: /app/containers.html
+                        subPath: containers.html
+                      - name: runtime-code
+                        mountPath: /app/zombies.html
+                        subPath: zombies.html
                     
                     resources:
                       requests:
@@ -695,6 +715,12 @@
                       - name: runtime-code
                         mountPath: /app/py_Logic/metrics.py
                         subPath: metrics.py
+                      - name: runtime-code
+                        mountPath: /app/containers.html
+                        subPath: containers.html
+                      - name: runtime-code
+                        mountPath: /app/zombies.html
+                        subPath: zombies.html
 
                     resources:
                       requests:

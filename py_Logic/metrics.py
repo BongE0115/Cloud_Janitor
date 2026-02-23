@@ -180,6 +180,9 @@ def get_docker_containers_fallback(url):
     cpu_query = 'rate(container_cpu_usage_seconds_total{id=~"/docker/[a-f0-9]{64}",cpu="total"}[2m]) * 1000'
     mem_query = 'container_memory_working_set_bytes{id=~"/docker/[a-f0-9]{64}"}'
     net_query = 'rate(container_network_receive_bytes_total{id=~"/docker/[a-f0-9]{64}"}[2m])'
+    # IOPS = I/O Operations Per Second (not bytes!)
+    iops_read_query = 'rate(container_fs_reads_total{id=~"/docker/[a-f0-9]{64}"}[2m])'
+    iops_write_query = 'rate(container_fs_writes_total{id=~"/docker/[a-f0-9]{64}"}[2m])'
 
     cpu_results = get_prom_result(url, cpu_query)
     if not cpu_results:
@@ -188,6 +191,8 @@ def get_docker_containers_fallback(url):
         cpu_results = get_prom_result(url, 'container_last_seen{id=~"/docker/[a-f0-9]{64}"}')
     mem_results = get_prom_result(url, mem_query)
     net_results = get_prom_result(url, net_query)
+    iops_read_results = get_prom_result(url, iops_read_query)
+    iops_write_results = get_prom_result(url, iops_write_query)
 
     rows = {}
     loki_map = get_loki_container_map()
@@ -207,6 +212,8 @@ def get_docker_containers_fallback(url):
             'cpu': float(item.get('value', [0, 0])[1]) if metric.get('__name__') != 'container_last_seen' else 0.0,
             'mem': 0.0,
             'net': 0.0,
+            'iops_read': 0.0,
+            'iops_write': 0.0,
             'type': infer_type_from_name(mapped_name),
             'zombie_type': '',
         }
@@ -230,6 +237,21 @@ def get_docker_containers_fallback(url):
         if cid not in rows:
             continue
         rows[cid]['net'] += float(item.get('value', [0, 0])[1])
+
+    # IOPS metrics (I/O Operations Per Second)
+    for item in iops_read_results:
+        metric = item.get('metric', {})
+        cid = metric.get('id', '')
+        if cid not in rows:
+            continue
+        rows[cid]['iops_read'] = float(item.get('value', [0, 0])[1])
+
+    for item in iops_write_results:
+        metric = item.get('metric', {})
+        cid = metric.get('id', '')
+        if cid not in rows:
+            continue
+        rows[cid]['iops_write'] = float(item.get('value', [0, 0])[1])
 
     return list(rows.values())
 

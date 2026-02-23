@@ -31,6 +31,8 @@ TC_SETUP="$TC_DIR/setup.sh"
 TC_TEARDOWN="$TC_DIR/teardown.sh"
 TC_CONNECT="$TC_DIR/setup-connection-to-cj.sh"
 TC_WHITELIST="$TC_DIR/whitelist.sh"
+TC_APP_COMPOSE="$TC_DIR/docker-compose.yml"
+TC_MONITOR_COMPOSE="$TC_DIR/docker-compose.monitoring.yml"
 
 ensure_tc_dir() {
     if [ ! -d "$TC_DIR" ]; then
@@ -44,9 +46,9 @@ get_prometheus_local_url() {
     local port=""
 
     if docker compose version >/dev/null 2>&1; then
-        mapped=$(docker compose -f "$TC_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
+        mapped=$(docker compose -f "$TC_MONITOR_COMPOSE" port prometheus 9090 2>/dev/null | tail -n1 || true)
     elif command -v docker-compose >/dev/null 2>&1; then
-        mapped=$(docker-compose -f "$TC_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
+        mapped=$(docker-compose -f "$TC_MONITOR_COMPOSE" port prometheus 9090 2>/dev/null | tail -n1 || true)
     fi
 
     if [ -n "$mapped" ]; then
@@ -69,8 +71,8 @@ usage() {
     echo "  install            PATH에 tc 등록"
     echo ""
     echo -e "${BOLD}초기화 (권장):${NC}"
-    echo "  init               기본 앱만 시작 (Prometheus는 connect 시 설치)"
-    echo "  connect -a <IP>    CJ 연결 + Prometheus/Promtail 자동 설치"
+    echo "  init               기본 앱만 시작"
+    echo "  connect -a <IP>    CJ 연결 요청 전송 (Prometheus는 pm start 후)"
     echo "  tunnel ...         CJ로 SSH 역터널 관리 (setup/stop/status)"
     echo "  whitelist ...      화이트리스트 관리 (list/show/set/add/remove/pick/sync)"
     echo ""
@@ -372,15 +374,6 @@ cmd_connect() {
         exit 1
     fi
     
-    # Prometheus가 실행 중인지 확인, 없으면 설치
-    local prom_url
-    prom_url="$(get_prometheus_local_url)"
-    if ! curl -s "$prom_url/-/healthy" > /dev/null 2>&1; then
-        log_info "Prometheus가 실행 중이 아닙니다. 설치를 시작합니다..."
-        cmd_prometheus start
-        echo ""
-    fi
-    
     cd "$TC_DIR"
     bash "$TC_CONNECT" "$@"
 }
@@ -433,14 +426,14 @@ cmd_prometheus() {
         stop)
             cd "$TC_DIR"
             if command -v docker-compose &> /dev/null; then
-                docker-compose stop prometheus cadvisor
+                docker-compose -f "$TC_MONITOR_COMPOSE" stop prometheus cadvisor promtail
             else
-                docker compose stop prometheus cadvisor
+                docker compose -f "$TC_MONITOR_COMPOSE" stop prometheus cadvisor promtail
             fi
             log_success "Target Prometheus 중지 완료"
             echo ""
             log_info "다음 명령어:"
-    echo "   tc pm start"
+            echo "   tc pm start"
             ;;
         status)
             log_info "Target Prometheus 상태 확인 중..."
@@ -466,9 +459,9 @@ cmd_logs() {
     ensure_tc_dir
     cd "$TC_DIR"
     if command -v docker-compose &> /dev/null; then
-        docker-compose logs -f "$@"
+        docker-compose -f "$TC_APP_COMPOSE" -f "$TC_MONITOR_COMPOSE" logs -f "$@"
     else
-        docker compose logs -f "$@"
+        docker compose -f "$TC_APP_COMPOSE" -f "$TC_MONITOR_COMPOSE" logs -f "$@"
     fi
 }
 
@@ -548,7 +541,7 @@ cmd_init() {
     log_info "🚀 TC (Target Cluster) 기본 앱 초기화"
     echo ""
     log_info "이 명령어는 기본 앱 컨테이너만 시작합니다."
-    log_info "Prometheus/Promtail은 tc connect 시 자동 설치됩니다."
+    log_info "Prometheus/Promtail은 tc pm start 후 tc connect를 실행하세요."
     echo ""
     
     # 1. CLI 설치
@@ -573,9 +566,11 @@ cmd_init() {
     echo "=========================================="
     echo ""
     echo "  1. CJ 서버에서: cj bootstrap"
-    echo "  2. TC 서버에서: tc connect -a <CJ_IP>"
+    echo "  2. TC 서버에서: tc pm start"
+    echo "  3. TC 서버에서: tc connect -a <CJ_IP>"
     echo ""
     echo "  예시:"
+    echo "    tc pm start"
     echo "    tc connect -a localhost       # 로컬"
     echo "    tc connect -a 192.168.1.100   # 원격"
     echo ""

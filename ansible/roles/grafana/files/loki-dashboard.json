@@ -2,6 +2,7 @@
   "id": null,
   "uid": "cloud-janitor-dashboard",
   "title": "Cloud Janitor - dashboard",
+  "folderUid": "",
   "refresh": "5s",
   "schemaVersion": 39,
   "templating": {

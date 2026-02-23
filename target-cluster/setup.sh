@@ -2,19 +2,18 @@
 
 # =============================================================================
 # Target Cluster Setup Script
-# Prometheus + 더미 컨테이너로 구성된 Target Cluster 설치
+# - apps: TC 기본 앱 컨테이너
+# - monitoring: Prometheus/cAdvisor/Promtail (CJ 연동 브리지)
 # =============================================================================
 
-set -e  # 에러 발생 시 즉시 종료
+set -e
 
-# 색상 정의
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 로그 함수
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
 }
@@ -31,88 +30,80 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# 사용법 출력
 usage() {
-    cat << EOF
+    cat << EOF2
 Usage: $0 [OPTIONS]
 
 Target Cluster 설치 스크립트
 
 OPTIONS:
-    -h, --help      이 도움말을 표시
-    --no-pull       이미지 pull 건너뜀
-    --detach        백그라운드 모드로 실행 (기본값)
-    --apps-only     앱 컨테이너만 실행
-    --prometheus-only  Prometheus + cAdvisor + Promtail 실행
+    -h, --help            이 도움말 표시
+    --no-pull             이미지 pull 건너뜀
+    --apps-only           앱 컨테이너만 실행 (기본값)
+    --prometheus-only     Prometheus + cAdvisor + Promtail 실행
+    --all                 앱 + 모니터링 브리지 전체 실행
 
 EXAMPLES:
-    $0                    # 기본 설치
-    $0 --no-pull          # 이미지 pull 없이 설치
+    $0                    # 앱 컨테이너만 시작
     $0 --apps-only        # 앱만 실행
-    $0 --prometheus-only  # Prometheus + Promtail 실행
-EOF
+    $0 --prometheus-only  # 모니터링 브리지 실행
+    $0 --all              # 전체 실행
+EOF2
     exit 0
 }
 
-# 파라미터 파싱
 PULL_IMAGES=true
-DETACH=true
-MODE="all"
+MODE="apps"
 
-for arg in "$@"; do
-    case $arg in
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         -h|--help)
             usage
             ;;
-    --no-pull)
+        --no-pull)
             PULL_IMAGES=false
+            shift
             ;;
-        --detach)
-            DETACH=true
+        --apps-only)
+            MODE="apps"
+            shift
             ;;
-    --apps-only)
-        MODE="apps"
-        ;;
-    --prometheus-only)
-        MODE="prometheus"
-        ;;
+        --prometheus-only)
+            MODE="prometheus"
+            shift
+            ;;
+        --all)
+            MODE="all"
+            shift
+            ;;
         *)
-            log_error "알 수 없는 옵션: $arg"
+            log_error "알 수 없는 옵션: $1"
             usage
             ;;
     esac
 done
 
-# =============================================================================
-# 사전 체크
-# =============================================================================
-
 log_info "Target Cluster 설치를 시작합니다..."
 
-# Docker 체크
-if ! command -v docker &> /dev/null; then
+if ! command -v docker >/dev/null 2>&1; then
     log_error "Docker가 설치되어 있지 않습니다. 먼저 Docker를 설치해주세요."
     exit 1
 fi
-
 log_success "Docker 확인 완료"
 
-# Docker Compose 체크
-if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
+if ! command -v docker-compose >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
     log_error "Docker Compose가 설치되어 있지 않습니다. 먼저 Docker Compose를 설치해주세요."
     exit 1
 fi
-
 log_success "Docker Compose 확인 완료"
 
-# 포트 충돌 체크
 port_in_use() {
-    local port=$1
-    lsof -Pi :$port -sTCP:LISTEN -t >/dev/null 2>&1
+    local port="$1"
+    lsof -Pi :"$port" -sTCP:LISTEN -t >/dev/null 2>&1
 }
 
 check_port() {
-    local port=$1
+    local port="$1"
     if port_in_use "$port"; then
         log_warning "포트 $port가 이미 사용 중입니다."
         return 1
@@ -120,36 +111,61 @@ check_port() {
     return 0
 }
 
-compose_up() {
-    if command -v docker-compose &> /dev/null; then
-        docker-compose up -d "$@"
-    else
-        docker compose up -d "$@"
-    fi
-}
-
-compose_pull() {
-    if command -v docker-compose &> /dev/null; then
-        docker-compose pull
-    else
-        docker compose pull
-    fi
-}
-
 candidate_ports() {
     local seed="${PROMETHEUS_PORT_CANDIDATES:-9091 19091 29091 39091}"
     local requested="${PROMETHEUS_HOST_PORT:-}"
     local seen=" "
+
     if [ -n "$requested" ]; then
         echo -n "$requested "
         seen="$seen$requested "
     fi
+
     for p in $seed; do
         if [[ "$seen" != *" $p "* ]]; then
             echo -n "$p "
             seen="$seen$p "
         fi
     done
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+MONITOR_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.monitoring.yml"
+
+if [ ! -f "$APP_COMPOSE_FILE" ]; then
+    log_error "앱 compose 파일을 찾을 수 없습니다: $APP_COMPOSE_FILE"
+    exit 1
+fi
+
+if { [ "$MODE" = "prometheus" ] || [ "$MODE" = "all" ]; } && [ ! -f "$MONITOR_COMPOSE_FILE" ]; then
+    log_error "모니터링 compose 파일을 찾을 수 없습니다: $MONITOR_COMPOSE_FILE"
+    exit 1
+fi
+
+COMPOSE_FILE_ARGS=()
+if [ "$MODE" = "apps" ]; then
+    COMPOSE_FILE_ARGS=(-f "$APP_COMPOSE_FILE")
+elif [ "$MODE" = "prometheus" ]; then
+    COMPOSE_FILE_ARGS=(-f "$MONITOR_COMPOSE_FILE")
+else
+    COMPOSE_FILE_ARGS=(-f "$APP_COMPOSE_FILE" -f "$MONITOR_COMPOSE_FILE")
+fi
+
+compose_cmd() {
+    if command -v docker-compose >/dev/null 2>&1; then
+        docker-compose "${COMPOSE_FILE_ARGS[@]}" "$@"
+    else
+        docker compose "${COMPOSE_FILE_ARGS[@]}" "$@"
+    fi
+}
+
+compose_up() {
+    compose_cmd up -d "$@"
+}
+
+compose_pull() {
+    compose_cmd pull "$@"
 }
 
 start_with_prometheus_port_retry() {
@@ -160,7 +176,6 @@ start_with_prometheus_port_retry() {
     for port in $(candidate_ports); do
         tried_any=true
 
-        # 이미 점유된 포트는 선제 스킵
         if port_in_use "$port"; then
             log_warning "포트 $port가 이미 사용 중입니다. 다음 후보를 시도합니다."
             continue
@@ -199,10 +214,10 @@ elif [ "$MODE" = "prometheus" ]; then
 else
     PORTS=(8081 8082 8080)
 fi
-PORT_CONFLICT=false
 
+PORT_CONFLICT=false
 for port in "${PORTS[@]}"; do
-    if ! check_port $port; then
+    if ! check_port "$port"; then
         PORT_CONFLICT=true
     fi
 done
@@ -211,68 +226,53 @@ if [ "$PORT_CONFLICT" = true ]; then
     log_error "필수 포트 중 하나가 이미 사용 중입니다. 충돌하는 서비스를 먼저 중지해주세요."
     exit 1
 fi
-
 log_success "포트 충돌 체크 완료"
 
-# =============================================================================
-# 설치 시작
-# =============================================================================
-
-# 스크립트 디렉토리로 이동
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
-
 log_info "작업 디렉토리: $SCRIPT_DIR"
 
 if [ -z "$DOCKER_CONFIG" ]; then
     DOCKER_CONFIG="$SCRIPT_DIR/.docker"
     export DOCKER_CONFIG
 fi
-
 mkdir -p "$DOCKER_CONFIG"
-
 if [ ! -f "$DOCKER_CONFIG/config.json" ]; then
     printf "{}" > "$DOCKER_CONFIG/config.json"
 fi
 
-# Docker 네트워크 생성 (이미 존재하면 무시)
 log_info "Docker 네트워크 생성 중..."
 docker network create tc-network 2>/dev/null || log_warning "네트워크가 이미 존재합니다."
 
-# 이미지 풀
 if [ "$PULL_IMAGES" = true ]; then
     log_info "Docker 이미지 다운로드 중..."
-    compose_pull || log_warning "이미지 pull 중 일부 오류 발생 (무시)"
+    if [ "$MODE" = "apps" ]; then
+        compose_pull app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev || log_warning "이미지 pull 중 일부 오류 발생 (무시)"
+    elif [ "$MODE" = "prometheus" ]; then
+        compose_pull prometheus cadvisor promtail || log_warning "이미지 pull 중 일부 오류 발생 (무시)"
+    else
+        compose_pull || log_warning "이미지 pull 중 일부 오류 발생 (무시)"
+    fi
     log_success "이미지 다운로드 완료"
 fi
 
-# 컨테이너 시작
 log_info "컨테이너 시작 중..."
 if [ "$MODE" = "apps" ]; then
     compose_up app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
 elif [ "$MODE" = "prometheus" ]; then
     start_with_prometheus_port_retry prometheus cadvisor promtail
 else
-    start_with_prometheus_port_retry
+    compose_up app-active app-zombie-sleeper app-zombie-completed app-zombie-test app-zombie-dev
+    start_with_prometheus_port_retry prometheus cadvisor promtail
 fi
-
 log_success "컨테이너 시작 완료"
 
-# =============================================================================
-# 설치 후 검증
-# =============================================================================
-
-log_info "컨테이너 상태 확인 중..."
-
-# 대기 함수
 wait_for_container() {
-    local container_name=$1
+    local container_name="$1"
     local max_wait=30
     local count=0
 
     log_info "$container_name 컨테이너가 실행될 때까지 대기 중..."
-
-    while [ $count -lt $max_wait ]; do
+    while [ "$count" -lt "$max_wait" ]; do
         if docker ps --format '{{.Names}}' | grep -q "$container_name"; then
             log_success "$container_name 실행 중"
             return 0
@@ -285,9 +285,6 @@ wait_for_container() {
     return 1
 }
 
-MAX_PROM_CHECK=0
-PROM_CHECK_COUNT=0
-
 if [ "$MODE" != "apps" ]; then
     wait_for_container "target-prometheus"
     wait_for_container "cadvisor"
@@ -296,16 +293,17 @@ if [ "$MODE" != "apps" ]; then
     sleep 5
 
     MAX_PROM_CHECK=10
-
-    while [ $PROM_CHECK_COUNT -lt $MAX_PROM_CHECK ]; do
-        if curl -s "http://localhost:${PROMETHEUS_HOST_PORT:-9091}/-/healthy" > /dev/null 2>&1; then
+    PROM_CHECK_COUNT=0
+    while [ "$PROM_CHECK_COUNT" -lt "$MAX_PROM_CHECK" ]; do
+        if curl -s "http://localhost:${PROMETHEUS_HOST_PORT:-9091}/-/healthy" >/dev/null 2>&1; then
             log_success "Prometheus가 정상적으로 실행 중입니다."
             break
         fi
         sleep 2
         PROM_CHECK_COUNT=$((PROM_CHECK_COUNT + 1))
     done
-    if [ $PROM_CHECK_COUNT -eq $MAX_PROM_CHECK ]; then
+
+    if [ "$PROM_CHECK_COUNT" -eq "$MAX_PROM_CHECK" ]; then
         log_warning "Prometheus 헬스 체크 실패 (나중에 확인 필요)"
     fi
 fi
@@ -313,27 +311,18 @@ fi
 if [ "$MODE" = "apps" ]; then
     echo ""
     echo "=========================================="
-    echo "🎉 Target 앱 컨테이너 설치 완료!"
+    echo "Target 앱 컨테이너 설치 완료"
     echo "=========================================="
     echo ""
-    echo "📊 주요 서비스:"
+    echo "서비스:"
     echo "   - Active App:       http://localhost:8081"
     echo "   - Zombie Test App:  http://localhost:8082"
     echo ""
-    echo "📦 실행 중인 컨테이너:"
+    echo "실행 중인 컨테이너:"
     docker ps --format "   - {{.Names}} ({{.Status}})" --filter "network=tc-network"
     echo ""
-    echo "🧟 좀비 컨테이너 (Cloud Janitor 삭제 대상):"
-    docker ps --format "   - {{.Names}} (zombie-type: {{.Labels}})" --filter "label=app-type=zombie" 2>/dev/null || log_warning "좀비 컨테이너를 찾을 수 없습니다."
-    echo ""
-    echo "🔧 유용한 명령어:"
-    echo "   - 로그 확인:     docker-compose logs -f [container_name]"
-    echo "   - 컨테이너 목록: docker-compose ps"
-    echo "   - 전체 중지:     ./teardown.sh"
-    echo "   - Prometheus 시작: ./setup.sh --prometheus-only"
-    echo ""
-    echo "➡️  다음 명령어:"
-    echo "   ./setup.sh --prometheus-only"
+    echo "다음 명령어:"
+    echo "   - 모니터링 브리지 시작: ./setup.sh --prometheus-only"
     echo ""
     exit 0
 fi
@@ -341,59 +330,34 @@ fi
 if [ "$MODE" = "prometheus" ]; then
     echo ""
     echo "=========================================="
-    echo "🎉 Target Prometheus 설치 완료!"
+    echo "Target 모니터링 브리지 설치 완료"
     echo "=========================================="
     echo ""
-    echo "📊 주요 서비스:"
+    echo "서비스:"
     echo "   - Prometheus:       http://localhost:${PROMETHEUS_HOST_PORT:-9091}"
-    echo "   - cAdvisor:        http://localhost:8080"
-    echo "   - Promtail:        http://localhost:9080"
+    echo "   - cAdvisor:         http://localhost:8080"
+    echo "   - Promtail:         docker logs -f promtail"
     echo ""
-    echo "📦 실행 중인 컨테이너:"
+    echo "실행 중인 컨테이너:"
     docker ps --format "   - {{.Names}} ({{.Status}})" --filter "network=tc-network"
     echo ""
-    echo "🔧 유용한 명령어:"
-    echo "   - 로그 확인:     docker-compose logs -f [container_name]"
-    echo "   - 컨테이너 목록: docker-compose ps"
-    echo "   - 전체 중지:     ./teardown.sh"
-    echo ""
-    echo "➡️  다음 명령어:"
-    echo "   cj setup"
+    echo "다음 명령어:"
+    echo "   - TC 연결 요청: ./setup-connection-to-cj.sh -a <CJ_HOST>"
     echo ""
     exit 0
 fi
 
-# =============================================================================
-# 설치 완료 요약
-# =============================================================================
-
 echo ""
 echo "=========================================="
-echo "🎉 Target Cluster 설치 완료!"
+echo "Target 전체 설치 완료"
 echo "=========================================="
 echo ""
-echo "📊 주요 서비스:"
+echo "서비스:"
 echo "   - Prometheus:       http://localhost:${PROMETHEUS_HOST_PORT:-9091}"
-echo "   - cAdvisor:        http://localhost:8080"
+echo "   - cAdvisor:         http://localhost:8080"
 echo "   - Active App:       http://localhost:8081"
 echo "   - Zombie Test App:  http://localhost:8082"
 echo ""
-echo "📦 실행 중인 컨테이너:"
+echo "실행 중인 컨테이너:"
 docker ps --format "   - {{.Names}} ({{.Status}})" --filter "network=tc-network"
-echo ""
-echo "🧟 좀비 컨테이너 (Cloud Janitor 삭제 대상):"
-docker ps --format "   - {{.Names}} (zombie-type: {{.Labels}})" --filter "label=app-type=zombie" 2>/dev/null || log_warning "좀비 컨테이너를 찾을 수 없습니다."
-echo ""
-echo "🔧 유용한 명령어:"
-echo "   - 로그 확인:     docker-compose logs -f [container_name]"
-echo "   - 컨테이너 목록: docker-compose ps"
-echo "   - 전체 중지:     ./teardown.sh"
-echo "   - Prometheus UI: http://localhost:${PROMETHEUS_HOST_PORT:-9091}"
-echo ""
-echo "📝 PromQL 쿼리 예시 (Cloud Janitor에서 사용):"
-echo "   - CPU 낮은 컨테이너:"
-echo "     rate(container_cpu_usage_seconds_total{name!=\"\"}[2m]) < 0.01"
-echo ""
-echo "   - 네트워크 낮은 컨테이너:"
-echo "     rate(container_network_receive_bytes_total{name!=\"\"}[2m]) < 100"
 echo ""
