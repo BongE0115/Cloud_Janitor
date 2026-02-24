@@ -1,0 +1,631 @@
+#!/bin/bash
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+TC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TC_SETUP="$TC_DIR/setup.sh"
+TC_TEARDOWN="$TC_DIR/teardown.sh"
+TC_CONNECT="$TC_DIR/setup-connection-to-cj.sh"
+TC_WHITELIST="$TC_DIR/whitelist.sh"
+TC_APP_COMPOSE="$TC_DIR/docker-compose.yml"
+TC_MONITOR_COMPOSE="$TC_DIR/docker-compose.monitoring.yml"
+
+ensure_tc_dir() {
+    if [ ! -d "$TC_DIR" ]; then
+        log_error "tc 디렉토리를 찾을 수 없습니다: $TC_DIR"
+        exit 1
+    fi
+}
+
+get_prometheus_local_url() {
+    local mapped=""
+    local port=""
+
+    if docker compose version >/dev/null 2>&1; then
+        mapped=$(docker compose -f "$TC_MONITOR_COMPOSE" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    elif command -v docker-compose >/dev/null 2>&1; then
+        mapped=$(docker-compose -f "$TC_MONITOR_COMPOSE" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    fi
+
+    if [ -n "$mapped" ]; then
+        port="${mapped##*:}"
+        if [[ "$port" =~ ^[0-9]+$ ]]; then
+            echo "http://localhost:$port"
+            return 0
+        fi
+    fi
+
+    echo "http://localhost:9091"
+}
+
+usage() {
+    echo -e "${BOLD}TC CLI Tool${NC}"
+    echo ""
+    echo -e "사용법: tc <command> [options]"
+    echo ""
+    echo -e "${BOLD}설치:${NC}"
+    echo "  install            PATH에 tc 등록"
+    echo ""
+    echo -e "${BOLD}초기화 (권장):${NC}"
+    echo "  init               기본 앱만 시작"
+    echo "  connect -a <IP>    CJ 연결 요청 전송 (Prometheus는 pm start 후)"
+    echo "  tunnel ...         CJ로 SSH 역터널 관리 (setup/stop/status)"
+    echo "  whitelist ...      화이트리스트 관리 (list/show/set/add/remove/pick/sync)"
+    echo ""
+    echo -e "${BOLD}자동화 (전체):${NC}"
+    echo "  bootstrap -a <IP>  전체 자동 설정 (init + connect)"
+    echo ""
+    echo -e "${BOLD}TC 관리:${NC}"
+    echo "  start              TC 시작 (앱 컨테이너만 실행)"
+    echo "  stop               TC 중지 (target-cluster/teardown.sh 실행)"
+    echo "  clear              TC 전체 정리 (컨테이너 + 네트워크 + 볼륨)"
+    echo "  pm start           Prometheus + Promtail 추가 실행"
+    echo "  pm stop            Target Prometheus 중지"
+    echo "  pm status          Target Prometheus 상태"
+    echo "  status             TC 상태 확인"
+    echo "  logs [service]     TC 컨테이너 로그"
+    echo ""
+    echo -e "${BOLD}기타:${NC}"
+    echo "  help               도움말 표시"
+    echo ""
+    echo -e "${BOLD}예시 (수동 실행):${NC}"
+    echo "  tc start"
+    echo "  tc pm start"
+    echo "  tc connect -a localhost"
+    echo "  tc tunnel setup --cj-host 10.0.0.10 --cj-user ubuntu --key ~/.ssh/cj_tunnel --remote-port 19091"
+    echo "  tc whitelist show"
+    echo ""
+}
+
+cmd_tunnel() {
+    ensure_tc_dir
+
+    local subcmd="${1:-help}"
+    shift || true
+
+    local cj_host=""
+    local cj_user="root"
+    local cj_port="22"
+    local key_file="$HOME/.ssh/id_rsa"
+    local remote_port="19091"
+    local local_port="9091"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --cj-host|--host)
+                cj_host="$2"
+                shift 2
+                ;;
+            --cj-user|--user)
+                cj_user="$2"
+                shift 2
+                ;;
+            --cj-port|--port)
+                cj_port="$2"
+                shift 2
+                ;;
+            --key)
+                key_file="$2"
+                shift 2
+                ;;
+            --remote-port)
+                remote_port="$2"
+                shift 2
+                ;;
+            --local-port)
+                local_port="$2"
+                shift 2
+                ;;
+            *)
+                log_error "알 수 없는 tunnel 옵션: $1"
+                echo "예시: tc tunnel setup --cj-host 10.0.0.10 --cj-user ubuntu --key ~/.ssh/cj_tunnel --remote-port 19091"
+                exit 1
+                ;;
+        esac
+    done
+
+    local pattern="ssh.*-R[[:space:]]*${remote_port}:localhost:${local_port}.*${cj_user}@${cj_host}"
+
+    case "$subcmd" in
+        setup)
+            if [ -z "$cj_host" ]; then
+                log_error "--cj-host가 필요합니다."
+                echo "예시: tc tunnel setup --cj-host 10.0.0.10 --cj-user ubuntu --key ~/.ssh/cj_tunnel --remote-port 19091"
+                exit 1
+            fi
+
+            if ! command -v ssh >/dev/null 2>&1; then
+                log_error "ssh 명령어를 찾을 수 없습니다."
+                exit 1
+            fi
+
+            if [ ! -f "$key_file" ]; then
+                log_error "SSH 키 파일을 찾을 수 없습니다: $key_file"
+                exit 1
+            fi
+
+            if ! curl -s "http://localhost:${local_port}/-/healthy" >/dev/null 2>&1; then
+                log_warning "TC Prometheus(localhost:${local_port}) 헬스 체크 실패"
+            fi
+
+            local existing
+            existing=$(pgrep -f "$pattern" || true)
+            if [ -n "$existing" ]; then
+                log_info "역터널이 이미 실행 중입니다. (PID: $existing)"
+                return 0
+            fi
+
+            log_info "SSH 역터널 생성: cj:${remote_port} -> tc:localhost:${local_port}"
+            log_info "접속: ${cj_user}@${cj_host}:${cj_port}"
+            ssh -i "$key_file" \
+                -p "$cj_port" \
+                -N \
+                -R "${remote_port}:localhost:${local_port}" \
+                "${cj_user}@${cj_host}" \
+                >/tmp/tc-reverse-tunnel.log 2>&1 &
+
+            sleep 1
+            local pid
+            pid=$(pgrep -f "$pattern" || true)
+            if [ -n "$pid" ]; then
+                log_success "역터널 생성 성공 (PID: $pid)"
+                log_info "CJ에서 접근 URL: http://localhost:${remote_port}"
+            else
+                log_error "역터널 생성 실패 (/tmp/tc-reverse-tunnel.log 확인)"
+                exit 1
+            fi
+            ;;
+        stop|teardown)
+            if [ -z "$cj_host" ]; then
+                log_error "--cj-host가 필요합니다."
+                echo "예시: tc tunnel stop --cj-host 10.0.0.10 --cj-user ubuntu --remote-port 19091"
+                exit 1
+            fi
+            local pids
+            pids=$(pgrep -f "$pattern" || true)
+            if [ -z "$pids" ]; then
+                log_info "실행 중인 역터널이 없습니다."
+                return 0
+            fi
+            # shellcheck disable=SC2086
+            kill $pids 2>/dev/null || true
+            log_success "역터널 종료 완료"
+            ;;
+        status)
+            if [ -z "$cj_host" ]; then
+                log_error "--cj-host가 필요합니다."
+                echo "예시: tc tunnel status --cj-host 10.0.0.10 --cj-user ubuntu --remote-port 19091"
+                exit 1
+            fi
+            local pid
+            pid=$(pgrep -f "$pattern" || true)
+            if [ -n "$pid" ]; then
+                log_success "역터널 실행 중 (PID: $pid)"
+                log_info "경로: cj:${remote_port} -> tc:localhost:${local_port}"
+            else
+                log_warning "역터널이 실행 중이지 않습니다."
+            fi
+            ;;
+        help|*)
+            echo "사용법:"
+            echo "  tc tunnel setup --cj-host <HOST> [--cj-user <USER>] [--cj-port 22] [--key <KEY>] [--remote-port 19091] [--local-port 9091]"
+            echo "  tc tunnel stop --cj-host <HOST> [--cj-user <USER>] [--remote-port 19091] [--local-port 9091]"
+            echo "  tc tunnel status --cj-host <HOST> [--cj-user <USER>] [--remote-port 19091] [--local-port 9091]"
+            ;;
+    esac
+}
+
+cmd_install() {
+    local cli_path="$TC_DIR/tc"
+    if [ ! -f "$cli_path" ]; then
+        log_error "tc 스크립트를 찾을 수 없습니다: $cli_path"
+        exit 1
+    fi
+
+    if [ ! -x "$cli_path" ]; then
+        chmod +x "$cli_path"
+    fi
+
+    local shell_name
+    shell_name="$(basename "${SHELL:-bash}")"
+    local rc_file
+    local profile_file
+
+    case "$shell_name" in
+        zsh)
+            rc_file="$HOME/.zshrc"
+            profile_file="$HOME/.zprofile"
+            ;;
+        bash)
+            rc_file="$HOME/.bashrc"
+            profile_file="$HOME/.bash_profile"
+            ;;
+        *)
+            rc_file="$HOME/.profile"
+            profile_file="$HOME/.profile"
+            ;;
+    esac
+
+    touch "$rc_file"
+    touch "$profile_file"
+    mkdir -p "$HOME/.local/bin"
+
+    local link_locations=(
+        "/opt/homebrew/bin/tc"
+        "/usr/local/bin/tc"
+        "$HOME/.local/bin/tc"
+    )
+
+    local link_success=false
+    local link_path
+
+    for link_path in "${link_locations[@]}"; do
+        local link_dir
+        link_dir=$(dirname "$link_path")
+
+        if [ ! -d "$link_dir" ]; then
+            continue
+        fi
+
+        if [ ! -w "$link_dir" ]; then
+            continue
+        fi
+
+        if [ -e "$link_path" ] && [ ! -L "$link_path" ]; then
+            continue
+        fi
+
+        rm -f "$link_path" 2>/dev/null || true
+        ln -s "$cli_path" "$link_path"
+        link_success=true
+        break
+    done
+
+    if ! grep -q "TC_HOME" "$rc_file" 2>/dev/null; then
+        cat >> "$rc_file" << EOF
+export TC_HOME="$TC_DIR"
+export PATH="\$HOME/.local/bin:\$TC_HOME:\$PATH"
+EOF
+    fi
+
+    if ! grep -q "TC_HOME" "$profile_file" 2>/dev/null; then
+        cat >> "$profile_file" << EOF
+export TC_HOME="$TC_DIR"
+export PATH="\$HOME/.local/bin:\$TC_HOME:\$PATH"
+EOF
+    fi
+
+    log_success "설치 완료"
+    if [ "$link_success" = true ]; then
+        log_info "tc 심볼릭 링크 생성 완료"
+    else
+        log_warning "tc 심볼릭 링크 생성 실패"
+    fi
+    log_info "새 터미널에서 tc 명령어를 사용할 수 있습니다."
+}
+
+cmd_start() {
+    ensure_tc_dir
+    if [ ! -f "$TC_SETUP" ]; then
+        log_error "setup.sh를 찾을 수 없습니다: $TC_SETUP"
+        exit 1
+    fi
+    cd "$TC_DIR"
+    bash "$TC_SETUP" --apps-only "$@"
+    echo ""
+    log_info "다음 명령어:"
+    echo "   tc pm start"
+}
+
+cmd_stop() {
+    ensure_tc_dir
+    if [ ! -f "$TC_TEARDOWN" ]; then
+        log_error "teardown.sh를 찾을 수 없습니다: $TC_TEARDOWN"
+        exit 1
+    fi
+    cd "$TC_DIR"
+    bash "$TC_TEARDOWN" "$@"
+    echo ""
+    log_info "다음 명령어:"
+    echo "   tc start"
+}
+
+cmd_clear() {
+    ensure_tc_dir
+    if [ ! -f "$TC_TEARDOWN" ]; then
+        log_error "teardown.sh를 찾을 수 없습니다: $TC_TEARDOWN"
+        exit 1
+    fi
+    cd "$TC_DIR"
+    bash "$TC_TEARDOWN" --all
+    echo ""
+    log_info "다음 명령어:"
+    echo "   tc start"
+}
+
+cmd_connect() {
+    ensure_tc_dir
+    if [ ! -f "$TC_CONNECT" ]; then
+        log_error "setup-connection-to-cj.sh를 찾을 수 없습니다: $TC_CONNECT"
+        exit 1
+    fi
+    
+    cd "$TC_DIR"
+    bash "$TC_CONNECT" "$@"
+}
+
+cmd_whitelist() {
+    ensure_tc_dir
+    if [ ! -f "$TC_WHITELIST" ]; then
+        log_error "whitelist.sh를 찾을 수 없습니다: $TC_WHITELIST"
+        exit 1
+    fi
+    cd "$TC_DIR"
+    bash "$TC_WHITELIST" "$@"
+}
+
+cmd_status() {
+    ensure_tc_dir
+    log_info "TC 컨테이너 상태 확인 중..."
+    docker ps --filter "network=tc-network" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+
+    if command -v curl &> /dev/null; then
+        local prom_url
+        prom_url="$(get_prometheus_local_url)"
+        if curl -s "$prom_url/-/healthy" > /dev/null 2>&1; then
+            log_success "Prometheus 정상 ($prom_url)"
+        else
+            log_warning "Prometheus 헬스 체크 실패 ($prom_url)"
+        fi
+    else
+        log_warning "curl이 없어 Prometheus 헬스 체크를 건너뜁니다."
+    fi
+}
+
+cmd_prometheus() {
+    ensure_tc_dir
+    local subcmd=${1:-start}
+    shift || true
+
+    case "$subcmd" in
+        start)
+            if [ ! -f "$TC_SETUP" ]; then
+                log_error "setup.sh를 찾을 수 없습니다: $TC_SETUP"
+                exit 1
+            fi
+            cd "$TC_DIR"
+            bash "$TC_SETUP" --prometheus-only "$@"
+            echo ""
+            log_info "다음 명령어:"
+            echo "   cj setup"
+            ;;
+        stop)
+            cd "$TC_DIR"
+            if command -v docker-compose &> /dev/null; then
+                docker-compose -f "$TC_MONITOR_COMPOSE" stop prometheus cadvisor promtail
+            else
+                docker compose -f "$TC_MONITOR_COMPOSE" stop prometheus cadvisor promtail
+            fi
+            log_success "Target Prometheus 중지 완료"
+            echo ""
+            log_info "다음 명령어:"
+            echo "   tc pm start"
+            ;;
+        status)
+            log_info "Target Prometheus 상태 확인 중..."
+            docker ps --filter "name=target-prometheus" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || true
+            if command -v curl &> /dev/null; then
+                local prom_url
+                prom_url="$(get_prometheus_local_url)"
+                if curl -s "$prom_url/-/healthy" > /dev/null 2>&1; then
+                    log_success "Prometheus 정상 ($prom_url)"
+                else
+                    log_warning "Prometheus 헬스 체크 실패 ($prom_url)"
+                fi
+            fi
+            ;;
+        *)
+            log_error "알 수 없는 prometheus 명령어: $subcmd"
+            exit 1
+            ;;
+    esac
+}
+
+cmd_logs() {
+    ensure_tc_dir
+    cd "$TC_DIR"
+    if command -v docker-compose &> /dev/null; then
+        docker-compose -f "$TC_APP_COMPOSE" -f "$TC_MONITOR_COMPOSE" logs -f "$@"
+    else
+        docker compose -f "$TC_APP_COMPOSE" -f "$TC_MONITOR_COMPOSE" logs -f "$@"
+    fi
+}
+
+cmd_bootstrap() {
+    log_info "🚀 TC (Target Cluster) 전체 자동 설정"
+    echo ""
+    log_info "이 명령어는 다음을 자동으로 실행합니다:"
+    echo "   1. tc install      - CLI 설치"
+    echo "   2. tc start        - TC 앱 시작 (좀비 컨테이너 포함)"
+    echo "   3. tc pm start     - Prometheus + Promtail 시작"
+    echo "   4. tc connect      - CJ에 연결 요청"
+    echo ""
+    
+    local cj_addr=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -a|--address)
+                cj_addr="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    
+    if [ -z "$cj_addr" ]; then
+        log_error "CJ 주소가 필요합니다."
+        echo "사용법: tc bootstrap -a <CJ_IP>"
+        echo ""
+        echo "예시:"
+        echo "  tc bootstrap -a localhost      # 로컬호스트"
+        echo "  tc bootstrap -a 192.168.1.100  # 원격 서버"
+        exit 1
+    fi
+    
+    # 1. CLI 설치
+    echo ""
+    log_info "📦 STEP 1/4: CLI 설치"
+    cmd_install
+    
+    # 2. TC 앱 시작
+    echo ""
+    log_info "🎯 STEP 2/4: TC 앱 시작"
+    cmd_start
+    
+    # 3. Prometheus + Promtail 시작
+    echo ""
+    log_info "📊 STEP 3/4: Prometheus + Promtail 시작"
+    cmd_prometheus start
+    
+    # 4. CJ에 연결 요청
+    echo ""
+    log_info "🔗 STEP 4/4: CJ 연결 요청"
+    cmd_connect -a "$cj_addr"
+    
+    echo ""
+    log_success "✅ TC Bootstrap 완료!"
+    echo ""
+    echo "=========================================="
+    echo "  📝 TC 서비스 상태"
+    echo "=========================================="
+    echo ""
+    cmd_status
+    echo ""
+    echo "=========================================="
+    echo "  🎉 이제 Grafana에서 데이터를 확인하세요"
+    echo "=========================================="
+    echo ""
+    echo "  CJ Grafana: http://$cj_addr:3000"
+    echo "  ID: admin / PW: changeme"
+    echo ""
+}
+
+cmd_init() {
+    ensure_tc_dir
+    log_info "🚀 TC (Target Cluster) 기본 앱 초기화"
+    echo ""
+    log_info "이 명령어는 기본 앱 컨테이너만 시작합니다."
+    log_info "Prometheus/Promtail은 tc pm start 후 tc connect를 실행하세요."
+    echo ""
+    
+    # 1. CLI 설치
+    log_info "📦 STEP 1/2: CLI 설치"
+    cmd_install
+    
+    # 2. TC 앱만 시작 (Prometheus 제외)
+    echo ""
+    log_info "🎯 STEP 2/2: TC 앱 시작"
+    if [ ! -f "$TC_SETUP" ]; then
+        log_error "setup.sh를 찾을 수 없습니다: $TC_SETUP"
+        exit 1
+    fi
+    cd "$TC_DIR"
+    bash "$TC_SETUP" --apps-only
+    
+    echo ""
+    log_success "✅ TC 기본 앱 초기화 완료!"
+    echo ""
+    echo "=========================================="
+    echo "  📝 다음 단계"
+    echo "=========================================="
+    echo ""
+    echo "  1. CJ 서버에서: cj bootstrap"
+    echo "  2. TC 서버에서: tc pm start"
+    echo "  3. TC 서버에서: tc connect -a <CJ_IP>"
+    echo ""
+    echo "  예시:"
+    echo "    tc pm start"
+    echo "    tc connect -a localhost       # 로컬"
+    echo "    tc connect -a 192.168.1.100   # 원격"
+    echo ""
+}
+
+main() {
+    local command=$1
+    shift || true
+
+    case "$command" in
+        install)
+            cmd_install
+            ;;
+        init)
+            cmd_init
+            ;;
+        start)
+            cmd_start "$@"
+            ;;
+        stop)
+            cmd_stop "$@"
+            ;;
+        clear)
+            cmd_clear
+            ;;
+        status)
+            cmd_status
+            ;;
+        prometheus|pm)
+            cmd_prometheus "$@"
+            ;;
+        connect)
+            cmd_connect "$@"
+            ;;
+        tunnel)
+            cmd_tunnel "$@"
+            ;;
+        whitelist)
+            cmd_whitelist "$@"
+            ;;
+        logs)
+            cmd_logs "$@"
+            ;;
+        bootstrap)
+            cmd_bootstrap "$@"
+            ;;
+        help|"")
+            usage
+            ;;
+        *)
+            log_error "알 수 없는 명령어: $command"
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

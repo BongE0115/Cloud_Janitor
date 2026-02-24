@@ -4,14 +4,95 @@
 # Terraform이 인프라(Helm)를 설치한 뒤, Ansible이 설정을 주입합니다.
 # =============================================================================
 
-# 1) Grafana Health 대기
-- name: Wait for Grafana to be ready
-  ansible.builtin.uri:
-    url: "{{ grafana_url }}/api/health"
-    method: GET
-    status_code: 200
-  register: _grafana_health
-  until: _grafana_health.status == 200
+- name: Ensure monitoring namespace exists
+  kubernetes.core.k8s:
+    name: monitoring
+    kind: Namespace
+    state: present
+    api_version: v1
+
+- name: Deploy Grafana
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: grafana
+        namespace: monitoring
+        labels:
+          app: grafana
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: grafana
+        template:
+          metadata:
+            labels:
+              app: grafana
+          spec:
+            containers:
+              - name: grafana
+                image: grafana/grafana:10.4.3
+                ports:
+                  - containerPort: 3000
+                env:
+                  - name: GF_SECURITY_ADMIN_USER
+                    value: "{{ grafana_admin_user }}"
+                  - name: GF_SECURITY_ADMIN_PASSWORD
+                    value: "{{ grafana_admin_password }}"
+                  - name: GF_UNIFIED_ALERTING_ENABLED
+                    value: "true"
+                  - name: GF_ALERTING_ENABLED
+                    value: "false"
+                  - name: GF_SMTP_ENABLED
+                    value: "true"
+                  - name: GF_SMTP_HOST
+                    value: "{{ env_vars['SMTP_HOST'] | default('smtp.gmail.com:587') }}"
+                  - name: GF_SMTP_USER
+                    value: "{{ env_vars['SMTP_USER'] | default('') }}"
+                  - name: GF_SMTP_PASSWORD
+                    value: "{{ env_vars['SMTP_PASSWORD'] | default('') }}"
+                  - name: GF_SMTP_FROM_ADDRESS
+                    value: "{{ env_vars['SMTP_FROM_ADDRESS'] | default(env_vars['SMTP_USER'] | default('')) }}"
+                  - name: GF_SMTP_FROM_NAME
+                    value: "{{ env_vars['SMTP_FROM_NAME'] | default('Cloud-Janitor-Alert') }}"
+                  - name: GF_SMTP_STARTTLS_POLICY
+                    value: "{{ env_vars['SMTP_STARTTLS_POLICY'] | default('MandatoryStartTLS') }}"
+                readinessProbe:
+                  httpGet:
+                    path: /api/health
+                    port: 3000
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+
+- name: Expose Grafana service
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: grafana
+        namespace: monitoring
+      spec:
+        type: NodePort
+        selector:
+          app: grafana
+        ports:
+          - name: http
+            port: 3000
+            targetPort: 3000
+            nodePort: 30080
+
+- name: Wait for Grafana deployment to be available
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    namespace: monitoring
+    name: grafana
+  register: grafana_deploy
+  until: (grafana_deploy.resources | length) > 0 and (grafana_deploy.resources[0].status.availableReplicas | default(0)) | int > 0
   retries: 30
   delay: 10
 
@@ -26,6 +107,7 @@
     force_basic_auth: true
     status_code: [200, 404]
   register: _prom_existing
+  when: (prometheus_internal_url | default('')) | length > 0
 
 - name: Create Prometheus datasource
   ansible.builtin.uri:
@@ -36,13 +118,16 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: prometheus-main
       name: Prometheus
       type: prometheus
       url: "{{ prometheus_internal_url }}"
       access: proxy
       isDefault: true
     status_code: [200]
-  when: _prom_existing.status == 404
+  when:
+    - (prometheus_internal_url | default('')) | length > 0
+    - _prom_existing.status == 404
 
 - name: Update Prometheus datasource
   ansible.builtin.uri:
@@ -53,13 +138,16 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: prometheus-main
       name: Prometheus
       type: prometheus
       url: "{{ prometheus_internal_url }}"
       access: proxy
       isDefault: true
     status_code: [200, 403]
-  when: _prom_existing.status == 200
+  when:
+    - (prometheus_internal_url | default('')) | length > 0
+    - _prom_existing.status == 200
 
 # ── Datasource: Loki ────────────────────────────────────────────────────────
 
@@ -82,6 +170,7 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: loki-main
       name: Loki
       type: loki
       url: "{{ loki_internal_url }}"
@@ -91,6 +180,7 @@
         maxLines: 1000
         lokiVersion: "2.9.10"
         httpMethod: "POST"
+        manageAlerts: false
     status_code: [200]
   when: _loki_existing.status == 404
 
@@ -103,6 +193,7 @@
     force_basic_auth: true
     body_format: json
     body:
+      uid: loki-main
       name: Loki
       type: loki
       url: "{{ loki_internal_url }}"
@@ -112,8 +203,94 @@
         maxLines: 1000
         lokiVersion: "2.9.10"
         httpMethod: "POST"
+        manageAlerts: false
     status_code: [200, 403]
   when: _loki_existing.status == 200
+
+# ── Datasource: MySQL (latest snapshot table) ───────────────────────────────
+
+- name: Get existing MySQL datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/name/MySQL"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: _mysql_existing
+
+- name: Create MySQL datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      uid: mysql-main
+      name: MySQL
+      type: mysql
+      url: "{{ env_vars['DB_HOST'] | default('mysql.mysql.svc.cluster.local') }}:3306"
+      database: "{{ env_vars['DB_NAME'] | default('janitor_db') }}"
+      user: "{{ env_vars['DB_USER'] | default('root') }}"
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxOpenConns: 20
+        maxIdleConns: 20
+        connMaxLifetime: 14400
+      secureJsonData:
+        password: "{{ env_vars['DB_PASSWORD'] | default('rootpassword') }}"
+    status_code: [200]
+  when: _mysql_existing.status == 404
+
+- name: Update MySQL datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/{{ _mysql_existing.json.id }}"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      uid: mysql-main
+      name: MySQL
+      type: mysql
+      url: "{{ env_vars['DB_HOST'] | default('mysql.mysql.svc.cluster.local') }}:3306"
+      database: "{{ env_vars['DB_NAME'] | default('janitor_db') }}"
+      user: "{{ env_vars['DB_USER'] | default('root') }}"
+      access: proxy
+      isDefault: false
+      jsonData:
+        maxOpenConns: 20
+        maxIdleConns: 20
+        connMaxLifetime: 14400
+      secureJsonData:
+        password: "{{ env_vars['DB_PASSWORD'] | default('rootpassword') }}"
+    status_code: [200, 403]
+  when: _mysql_existing.status == 200
+
+- name: Re-fetch MySQL datasource (to get UID)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/datasources/name/MySQL"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200]
+  register: _mysql_ds
+
+- name: Set alerting helper facts
+  ansible.builtin.set_fact:
+    mysql_ds_uid: "{{ _mysql_ds.json.uid | default('mysql-main') }}"
+    alert_email_addresses: "{{ env_vars['ALERT_EMAILS'] | default(env_vars['SMTP_USER'] | default('')) }}"
+    alert_pending_for: "{{ env_vars['ALERT_PENDING_FOR'] | default('0s') }}"
+    alert_deleted_for: "{{ env_vars['ALERT_DELETED_FOR'] | default('30s') }}"
+    alert_rule_interval_seconds: "{{ (env_vars['ALERT_RULE_INTERVAL_SECONDS'] | default('30')) | int }}"
+    alert_group_wait: "{{ env_vars['ALERT_GROUP_WAIT'] | default('0s') }}"
+    alert_group_interval: "{{ env_vars['ALERT_GROUP_INTERVAL'] | default('1m') }}"
+    alert_repeat_interval: "{{ env_vars['ALERT_REPEAT_INTERVAL'] | default('24h') }}"
 
 # ── Dashboard Import ────────────────────────────────────────────────────────
 
@@ -129,6 +306,225 @@
       dashboard: "{{ lookup('file', role_path + '/files/loki-dashboard.json') | from_json }}"
       overwrite: true
     status_code: [200]
+
+# ── Alerting: Contact point / Policy / Rules ───────────────────────────────
+
+- name: Delete Cloud Janitor folder if exists (alerts will use root folder)
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/folders/cloud-janitor"
+    method: DELETE
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+
+- name: Load and apply contact point payload
+  ansible.builtin.set_fact:
+    _contact_points_payload: >-
+      {{
+        (
+          lookup('file', role_path + '/files/contact-points.json')
+          | replace('__ALERT_EMAILS__', alert_email_addresses)
+        ) | from_json
+      }}
+
+- name: Get existing contact points
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/contact-points"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200]
+  register: _existing_contact_points
+  when: (alert_email_addresses | trim | length) > 0
+
+- name: Collect existing contact point UIDs
+  ansible.builtin.set_fact:
+    _existing_contact_point_uids: >-
+      {{
+        _existing_contact_points.json
+        | map(attribute='uid')
+        | reject('equalto', '')
+        | list
+      }}
+  when: (alert_email_addresses | trim | length) > 0
+
+- name: Create contact points when missing
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/contact-points"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/json"
+      X-Disable-Provenance: "true"
+    body_format: json
+    body: "{{ item }}"
+    status_code: [200, 201, 202]
+  loop: "{{ _contact_points_payload }}"
+  when:
+    - (alert_email_addresses | trim | length) > 0
+    - (item.uid | default('')) not in (_existing_contact_point_uids | default([]))
+
+- name: Update contact points when existing
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/contact-points/{{ item.uid }}"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/json"
+      X-Disable-Provenance: "true"
+    body_format: json
+    body: "{{ item }}"
+    status_code: [200, 202]
+  loop: "{{ _contact_points_payload }}"
+  when:
+    - (alert_email_addresses | trim | length) > 0
+    - (item.uid | default('')) in (_existing_contact_point_uids | default([]))
+
+- name: Load notification policy JSON
+  ansible.builtin.set_fact:
+    _policy_payload: >-
+      {{
+        (
+          lookup('file', role_path + '/files/notification-policy.json')
+          | replace('__ALERT_GROUP_WAIT__', alert_group_wait)
+          | replace('__ALERT_GROUP_INTERVAL__', alert_group_interval)
+          | replace('__ALERT_REPEAT_INTERVAL__', alert_repeat_interval)
+        ) | from_json
+      }}
+
+- name: Apply notification policy
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/policies"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/json"
+      X-Disable-Provenance: "true"
+    body_format: json
+    body: "{{ _policy_payload }}"
+    status_code: [200, 202]
+  when: (alert_email_addresses | trim | length) > 0
+
+- name: Wait until zombie_lifecycle table is queryable from Grafana MySQL datasource
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/ds/query"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      queries:
+        - refId: A
+          datasource:
+            uid: "{{ mysql_ds_uid }}"
+          format: table
+          instant: true
+          rawSql: "SELECT COUNT(*) AS value FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'zombie_lifecycle';"
+    status_code: [200, 400, 500]
+  register: _zombie_table_probe
+  until:
+    - _zombie_table_probe.status == 200
+    - ((_zombie_table_probe.json | default({})).get('results', {}).get('A', {}).get('status', 0) | int) == 200
+  retries: 30
+  delay: 2
+  when: (alert_email_addresses | trim | length) > 0
+
+- name: Get all alert rules
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/alert-rules"
+    method: GET
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    status_code: [200]
+  register: _all_rules
+
+- name: Define alert rule specs
+  ansible.builtin.set_fact:
+    _alert_rule_specs:
+      - name: pending
+        file: "{{ role_path }}/files/grafana-alerts-pending.json"
+        uid: "pending-alerts"
+      - name: deleted
+        file: "{{ role_path }}/files/grafana-alerts-deleted.json"
+        uid: "deleted-alerts"
+
+- name: Set CJ Base URL for action links
+  ansible.builtin.set_fact:
+    cj_base_url: "{{ env_vars['CJ_BASE_URL'] | default('http://localhost:30800') }}"
+
+- name: Build alert rule payload items
+  ansible.builtin.set_fact:
+    _alert_rule_items: >-
+      {{
+        (_alert_rule_items | default([])) + [
+          {
+            'name': item.name,
+            'uid': item.uid,
+            'payload': (
+              (
+                lookup('file', item.file)
+                | replace('__MYSQL_DS_UID__', mysql_ds_uid)
+                | replace('YOUR_CJ_HOST:30800', (cj_base_url | regex_replace('^https?://', '')))
+              ) | from_json
+              | combine(
+                  {
+                    'uid': item.uid,
+                    'folderUID': '',
+                    'for': (alert_pending_for if item.name == 'pending' else alert_deleted_for),
+                    'intervalSeconds': alert_rule_interval_seconds
+                  },
+                  recursive=True
+                )
+            ),
+            'existing': (_all_rules.json | selectattr('uid', 'equalto', item.uid) | list)
+          }
+        ]
+      }}
+  loop: "{{ _alert_rule_specs }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create alert rule if missing
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/alert-rules"
+    method: POST
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body: "{{ item.payload }}"
+    status_code: [201, 409]
+  loop: "{{ _alert_rule_items }}"
+  when:
+    - (alert_email_addresses | trim | length) > 0
+    - item.existing | length == 0
+
+- name: Update alert rule if exists
+  ansible.builtin.uri:
+    url: "{{ grafana_url }}/api/v1/provisioning/alert-rules/{{ item.uid }}"
+    method: PUT
+    user: "{{ grafana_admin_user }}"
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body: "{{ item.payload }}"
+    status_code: [200]
+  loop: "{{ _alert_rule_items }}"
+  when:
+    - (alert_email_addresses | trim | length) > 0
+    - item.existing | length > 0
 
 # ── 결과 출력 ───────────────────────────────────────────────────────────────
 

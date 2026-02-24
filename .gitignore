@@ -1,11 +1,7 @@
 # Terraform
-.terraform/
-*.tfstate
-*.tfstate.backup
-*.tfstate.*.backup
-*.tfvars
-*.tfplan
-.terraform.lock.hcl
+terraform/**
+!terraform/*.tf
+!terraform/**/*.tf
 
 # Environment
 .env
@@ -52,3 +48,5 @@ MANIFEST
 *.swp
 *.swo
 terraform/cloud-janitor-cluster-config
+
+.docker/

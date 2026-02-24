@@ -1,0 +1,17 @@
+#!/bin/bash
+
+set -e
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TC_CLI="$ROOT_DIR/target-cluster/tc"
+
+if [ ! -f "$TC_CLI" ]; then
+    echo "[ERROR] target-cluster/tc를 찾을 수 없습니다: $TC_CLI" >&2
+    exit 1
+fi
+
+if [ ! -x "$TC_CLI" ]; then
+    chmod +x "$TC_CLI"
+fi
+
+exec "$TC_CLI" "$@"

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cloud Janitor - Container Dashboard</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #eee; }}
+        .container {{ max-width: 1500px; margin: 0 auto; }}
+        h1 {{ color: #00d4ff; margin-bottom: 10px; }}
+        .subtitle {{ color: #888; margin-bottom: 20px; }}
+        .tabs {{ margin-bottom: 20px; }}
+        .tab {{ display: inline-block; padding: 10px 20px; background: #16213e; color: #888; border: none; cursor: pointer; border-radius: 4px 4px 0 0; margin-right: 5px; }}
+        .tab.active {{ background: #0f3460; color: #00d4ff; }}
+        .tab:hover {{ background: #1f3a6a; }}
+        table {{ width: 100%; border-collapse: collapse; background: #16213e; border-radius: 8px; overflow: hidden; }}
+        th, td {{ padding: 10px 12px; text-align: left; border-bottom: 1px solid #2a3a5a; }}
+        th {{ background: #0f3460; color: #00d4ff; font-weight: 600; }}
+        tr:hover {{ background: #1f3a6a; }}
+        .btn {{ padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; margin: 2px; }}
+        .btn-delete {{ background: #e74c3c; color: white; }}
+        .btn-delete:hover {{ background: #c0392b; }}
+        .btn-whitelist {{ background: #9b59b6; color: white; }}
+        .btn-whitelist:hover {{ background: #8e44ad; }}
+        .btn-unwhitelist {{ background: #e67e22; color: white; }}
+        .btn-unwhitelist:hover {{ background: #d35400; }}
+        .btn-stop {{ background: #e67e22; color: white; }}
+        .btn-stop:hover {{ background: #d35400; }}
+        .status-pending {{ color: #f39c12; font-weight: bold; }}
+        .status-active {{ color: #27ae60; }}
+        .status-stopped {{ color: #9b59b6; font-weight: bold; }}
+        .status-whitelisted {{ color: #9b59b6; }}
+        .status-deleted {{ color: #e74c3c; }}
+        .status-recovered {{ color: #3498db; }}
+        .metrics {{ font-size: 11px; color: #888; }}
+        .result-msg {{ padding: 15px; margin: 20px 0; border-radius: 8px; }}
+        .result-success {{ background: #1e8449; }}
+        .result-error {{ background: #c0392b; }}
+        .empty {{ text-align: center; padding: 40px; color: #888; }}
+        .section-title {{ color: #00d4ff; margin: 20px 0 10px; padding-bottom: 5px; border-bottom: 1px solid #2a3a5a; }}
+        .whitelist-badge {{ background: #9b59b6; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; margin-left: 5px; }}
+        .zombie-badge {{ background: #e74c3c; color: white; padding: 2px 6px; border-radius: 3px; font-size: 10px; margin-left: 5px; }}
+        
+        /* Log panel styles */
+        .clickable-row {{ cursor: pointer; }}
+        .log-row {{ display: none; }}
+        .log-row.open {{ display: table-row; }}
+        .log-panel {{ display: none; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; margin: 10px 0; max-height: 300px; overflow-y: auto; }}
+        .log-panel.open {{ display: block; }}
+        .log-content {{ padding: 12px; font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }}
+        .log-line {{ padding: 2px 0; border-bottom: 1px solid #21262d; }}
+        .log-time {{ color: #6e7681; }}
+        .log-loading {{ color: #888; padding: 20px; text-align: center; }}
+        .log-error {{ color: #f85149; padding: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧹 Cloud Janitor</h1>
+        <p class="subtitle">TC Container Management Dashboard</p>
+
+        {message}
+        
+        {content}
+    </div>
+    
+    <script>
+        function toggleLog(rowId, tcName, containerName, evt) {{
+            if (evt) evt.stopPropagation();
+            
+            const logRow = document.getElementById('log-row-' + rowId);
+            const panel = document.getElementById('log-' + rowId);
+            if (!panel || !logRow) return;
+            
+            document.querySelectorAll('.log-row').forEach(row => {{
+                if (row.id !== 'log-row-' + rowId) {{
+                    row.classList.remove('open');
+                    const p = row.querySelector('.log-panel');
+                    if (p) p.classList.remove('open');
+                }}
+            }});
+            
+            if (panel.classList.contains('open')) {{
+                panel.classList.remove('open');
+                logRow.classList.remove('open');
+                return;
+            }}
+            
+            panel.classList.add('open');
+            logRow.classList.add('open');
+            const content = panel.querySelector('.log-content');
+            content.innerHTML = '<div class="log-loading">⏳ 로그 로딩 중...</div>';
+            
+            const target = encodeURIComponent(containerName || '');
+            fetch('/api/v1/logs?container_name=' + target + '&limit=50')
+                .then(r => r.json())
+                .then(data => {{
+                    if (data.error) {{
+                        content.innerHTML = '<div class="log-error">❌ ' + data.error + '</div>';
+                        return;
+                    }}
+                    if (!data.logs || data.logs.length === 0) {{
+                        content.innerHTML = '<div class="log-loading">📭 로그 없음</div>';
+                        return;
+                    }}
+                    let html = '';
+                    data.logs.forEach(log => {{
+                        html += '<div class="log-line"><span class="log-time">' + (log.time || '') + '</span> ' + (log.message || log) + '</div>';
+                    }});
+                    content.innerHTML = html;
+                    panel.scrollTop = panel.scrollHeight;
+                }})
+                .catch(err => {{
+                    content.innerHTML = '<div class="log-error">❌ ' + err.message + '</div>';
+                }});
+        }}
+        
+        function addToWhitelist(tcName, containerName, rowId, evt) {{
+            if (evt) evt.stopPropagation();
+            if (!confirm('"' + containerName + '"을(를) 화이트리스트에 추가하시겠습니까?')) return;
+            
+            fetch('/api/v1/targets/' + encodeURIComponent(tcName) + '/whitelist', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ add_containers: [containerName] }})
+            }})
+            .then(r => r.json())
+            .then(data => {{
+                if (data.error) alert('❌ ' + data.error);
+                else location.reload();
+            }})
+            .catch(err => alert('❌ ' + err.message));
+        }}
+        
+        function removeFromWhitelist(tcName, containerName, rowId, evt) {{
+            if (evt) evt.stopPropagation();
+            if (!confirm('"' + containerName + '"을(를) 화이트리스트에서 제거하시겠습니까?')) return;
+            
+            fetch('/api/v1/targets/' + encodeURIComponent(tcName) + '/whitelist/remove', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ container_name: containerName }})
+            }})
+            .then(r => r.json())
+            .then(data => {{
+                if (data.error) alert('❌ ' + data.error);
+                else location.reload();
+            }})
+            .catch(err => alert('❌ ' + err.message));
+        }}
+        
+        function stopContainer(lifecycleId, rowId, evt) {{
+            if (evt) evt.stopPropagation();
+            if (!confirm('이 컨테이너를 멈춤(STOPPED) 처리하시겠습니까?')) return;
+            
+            fetch('/api/v1/zombies/' + lifecycleId + '/stop', {{ method: 'POST' }})
+                .then(r => r.json())
+                .then(data => {{
+                    if (data.error) alert('❌ ' + data.error);
+                    else location.reload();
+                }})
+                .catch(err => alert('❌ ' + err.message));
+        }}
+    </script>
+</body>
+</html>
