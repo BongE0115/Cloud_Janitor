@@ -83,6 +83,7 @@ EOF
 # 파라미터 파싱
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TC_ENV_FILE="$SCRIPT_DIR/.env"
+MONITOR_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.monitoring.yml"
 
 # Load TC-local .env if present (for defaults)
 if [ -f "$TC_ENV_FILE" ]; then
@@ -157,10 +158,10 @@ resolve_default_prom_url() {
     local mapped=""
     local detected=""
 
-    if docker compose version >/dev/null 2>&1; then
-        mapped=$(docker compose -f "$SCRIPT_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
-    elif command -v docker-compose >/dev/null 2>&1; then
-        mapped=$(docker-compose -f "$SCRIPT_DIR/docker-compose.yml" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    if [ -f "$MONITOR_COMPOSE_FILE" ] && docker compose version >/dev/null 2>&1; then
+        mapped=$(docker compose -f "$MONITOR_COMPOSE_FILE" port prometheus 9090 2>/dev/null | tail -n1 || true)
+    elif [ -f "$MONITOR_COMPOSE_FILE" ] && command -v docker-compose >/dev/null 2>&1; then
+        mapped=$(docker-compose -f "$MONITOR_COMPOSE_FILE" port prometheus 9090 2>/dev/null | tail -n1 || true)
     fi
 
     if [ -n "$mapped" ]; then
@@ -267,11 +268,17 @@ done
 # 컨테이너 ID -> 이름/역할 매핑 수집
 # 우선순위:
 # 1) docker compose ps (TC 앱 기준)
-# 2) docker ps --filter network=tc-network (fallback)
+# 2) docker ps -a --filter network=tc-network (fallback)
 CONTAINER_MAP_JSON="{}"
 if command -v docker >/dev/null 2>&1; then
     collect_map_from_compose() {
-        "$@" ps --format json 2>/dev/null | python3 -c '
+        local include_mode="$1"
+        shift
+        if [ "$include_mode" = "all" ]; then
+            "$@" ps --all --format json 2>/dev/null
+        else
+            "$@" ps --format json 2>/dev/null
+        fi | python3 -c '
 import json, sys, subprocess
 
 def infer_type(name, service):
@@ -310,6 +317,7 @@ for row in rows:
     cid = str(row.get("ID") or row.get("Id") or row.get("id") or "")
     name = str(row.get("Name") or row.get("name") or "")
     service = str(row.get("Service") or row.get("service") or "")
+    state = str(row.get("State") or row.get("state") or "").lower()
     if not cid:
         continue
     short = cid[:12]
@@ -336,6 +344,7 @@ for row in rows:
         "name": name or service or short,
         "type": app_type,
         "zombie_type": zombie_type,
+        "state": state,
     }
 
 print(json.dumps(out, ensure_ascii=False))
@@ -343,8 +352,8 @@ print(json.dumps(out, ensure_ascii=False))
     }
 
     collect_map_from_docker_ps() {
-        docker ps --filter "network=tc-network" \
-            --format '{{.ID}}|{{.Names}}|{{.Label "app-type"}}|{{.Label "zombie-type"}}' | \
+        docker ps -a --filter "network=tc-network" \
+            --format '{{.ID}}|{{.Names}}|{{.State}}|{{.Label "app-type"}}|{{.Label "zombie-type"}}' | \
             python3 -c '
 import sys, json
 m = {}
@@ -353,11 +362,12 @@ for line in sys.stdin:
     if not line:
         continue
     parts = line.split("|")
-    if len(parts) < 4:
+    if len(parts) < 5:
         continue
-    cid, name, app_type, zombie_type = parts[0], parts[1], parts[2], parts[3]
+    cid, name, state, app_type, zombie_type = parts[0], parts[1], parts[2], parts[3], parts[4]
     m[cid[:12]] = {
         "name": name,
+        "state": state.lower() if state else "",
         "type": app_type or "unknown",
         "zombie_type": zombie_type or ""
     }
@@ -365,10 +375,14 @@ print(json.dumps(m, ensure_ascii=False))
 '
     }
 
-    if docker compose ps --format json >/dev/null 2>&1; then
-        CONTAINER_MAP_JSON=$(collect_map_from_compose docker compose || echo "{}")
+    if docker compose ps --all --format json >/dev/null 2>&1; then
+        CONTAINER_MAP_JSON=$(collect_map_from_compose all docker compose || echo "{}")
+    elif docker compose ps --format json >/dev/null 2>&1; then
+        CONTAINER_MAP_JSON=$(collect_map_from_compose running docker compose || echo "{}")
+    elif command -v docker-compose >/dev/null 2>&1 && docker-compose ps --all --format json >/dev/null 2>&1; then
+        CONTAINER_MAP_JSON=$(collect_map_from_compose all docker-compose || echo "{}")
     elif command -v docker-compose >/dev/null 2>&1 && docker-compose ps --format json >/dev/null 2>&1; then
-        CONTAINER_MAP_JSON=$(collect_map_from_compose docker-compose || echo "{}")
+        CONTAINER_MAP_JSON=$(collect_map_from_compose running docker-compose || echo "{}")
     fi
 
     # compose 결과가 비었으면 네트워크 기준 fallback
@@ -520,7 +534,9 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
     log_info "TC Promtail Loki URL 설정: $LOKI_PUSH_URL"
     if [ -f "$TC_ENV_FILE" ]; then
         if grep -q '^LOKI_URL=' "$TC_ENV_FILE"; then
-            sed -i "s|^LOKI_URL=.*|LOKI_URL=$LOKI_PUSH_URL|" "$TC_ENV_FILE"
+            escaped_loki_url=$(printf '%s' "$LOKI_PUSH_URL" | sed 's/[&|]/\\&/g')
+            sed -i.bak "s|^LOKI_URL=.*|LOKI_URL=$escaped_loki_url|" "$TC_ENV_FILE"
+            rm -f "${TC_ENV_FILE}.bak"
         else
             echo "LOKI_URL=$LOKI_PUSH_URL" >> "$TC_ENV_FILE"
         fi
@@ -528,13 +544,29 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
         echo "LOKI_URL=$LOKI_PUSH_URL" > "$TC_ENV_FILE"
     fi
 
-    # promtail 재시작으로 변경사항 반영
-    if command -v docker-compose >/dev/null 2>&1; then
-        (cd "$SCRIPT_DIR" && docker-compose up -d promtail)
+    # promtail 재시작으로 변경사항 반영 (실패해도 TC 등록 자체는 유지)
+    if [ ! -f "$MONITOR_COMPOSE_FILE" ]; then
+        log_warning "모니터링 compose 파일이 없어 Promtail 반영을 건너뜁니다: $MONITOR_COMPOSE_FILE"
     else
-        (cd "$SCRIPT_DIR" && docker compose up -d promtail)
+        promtail_restarted=false
+        if command -v docker-compose >/dev/null 2>&1; then
+            if (cd "$SCRIPT_DIR" && docker-compose -f "$MONITOR_COMPOSE_FILE" up -d promtail); then
+                promtail_restarted=true
+            else
+                log_warning "Promtail 재시작 실패: tc pm start 상태를 확인하세요."
+            fi
+        else
+            if (cd "$SCRIPT_DIR" && docker compose -f "$MONITOR_COMPOSE_FILE" up -d promtail); then
+                promtail_restarted=true
+            else
+                log_warning "Promtail 재시작 실패: tc pm start 상태를 확인하세요."
+            fi
+        fi
+
+        if [ "$promtail_restarted" = true ]; then
+            log_success "TC Promtail 설정 반영 완료"
+        fi
     fi
-    log_success "TC Promtail 설정 반영 완료"
 
     # =============================================================================
     # 연결 요청 완료 요약

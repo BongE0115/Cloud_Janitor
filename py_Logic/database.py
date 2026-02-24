@@ -73,6 +73,15 @@ def ensure_lifecycle_table(conn):
         cursor.close()
 
 
+def ensure_runtime_schema(config=None):
+    """Ensure runtime-required tables exist for alerting/cleanup flows."""
+    conn = _get_connection(config)
+    try:
+        ensure_lifecycle_table(conn)
+    finally:
+        conn.close()
+
+
 def upsert_registered_target(payload):
     """Insert or update a registered TC target."""
     conn = _get_connection()
@@ -256,7 +265,7 @@ def save_billing_and_delete(v1, pod_obj, config):
 
 
 def add_or_update_zombie(tc_name, container_name, short_id, reason, cpu_m, mem_mi, net_b, config):
-    """Upsert a pending zombie lifecycle row for deferred cleanup."""
+    """Upsert a pending zombie lifecycle row. Simple approach - only PENDING records exist."""
     if not tc_name or not container_name:
         return False
 
@@ -265,14 +274,35 @@ def add_or_update_zombie(tc_name, container_name, short_id, reason, cpu_m, mem_m
     try:
         ensure_lifecycle_table(conn)
 
+        # If latest record is STOPPED, keep manual stop override (do not recreate PENDING).
         cursor.execute(
             """
-            SELECT id
+            SELECT id, status
             FROM zombie_lifecycle
-            WHERE tc_name = %s
-              AND container_name = %s
-              AND status = 'PENDING'
+            WHERE tc_name = %s AND container_name = %s
             ORDER BY id DESC
+            LIMIT 1
+            """,
+            (tc_name, container_name),
+        )
+        latest = cursor.fetchone()
+        if latest and str(latest.get("status") or "").upper() == "STOPPED":
+            cursor.execute(
+                """
+                UPDATE zombie_lifecycle
+                   SET cpu_m = %s, mem_mi = %s, net_b = %s, reason = %s, short_id = %s, updated_at = UTC_TIMESTAMP()
+                 WHERE id = %s
+                """,
+                (float(cpu_m), float(mem_mi), float(net_b), str(reason), short_id, int(latest["id"])),
+            )
+            conn.commit()
+            return True
+
+        # Check if PENDING record already exists
+        cursor.execute(
+            """
+            SELECT id FROM zombie_lifecycle
+            WHERE tc_name = %s AND container_name = %s AND status = 'PENDING'
             LIMIT 1
             """,
             (tc_name, container_name),
@@ -280,20 +310,17 @@ def add_or_update_zombie(tc_name, container_name, short_id, reason, cpu_m, mem_m
         existing = cursor.fetchone()
 
         if existing:
+            # Update existing PENDING record
             cursor.execute(
                 """
                 UPDATE zombie_lifecycle
-                   SET cpu_m = %s,
-                       mem_mi = %s,
-                       net_b = %s,
-                       reason = %s,
-                       short_id = %s,
-                       updated_at = UTC_TIMESTAMP()
+                   SET cpu_m = %s, mem_mi = %s, net_b = %s, reason = %s, short_id = %s, updated_at = UTC_TIMESTAMP()
                  WHERE id = %s
                 """,
                 (float(cpu_m), float(mem_mi), float(net_b), str(reason), short_id, int(existing["id"])),
             )
         else:
+            # Create new PENDING record
             grace_minutes = max(1, int(config.get("GRACE_PERIOD_MINUTES", 10)))
             now_utc = _utc_now_naive()
             scheduled_at = now_utc + timedelta(minutes=grace_minutes)
@@ -305,17 +332,8 @@ def add_or_update_zombie(tc_name, container_name, short_id, reason, cpu_m, mem_m
                 )
                 VALUES (%s, %s, %s, 'PENDING', %s, %s, %s, %s, %s, %s)
                 """,
-                (
-                    tc_name,
-                    container_name,
-                    short_id,
-                    now_utc,
-                    scheduled_at,
-                    str(reason),
-                    float(cpu_m),
-                    float(mem_mi),
-                    float(net_b),
-                ),
+                (tc_name, container_name, short_id, now_utc, scheduled_at, str(reason),
+                 float(cpu_m), float(mem_mi), float(net_b)),
             )
 
         conn.commit()
@@ -328,8 +346,42 @@ def add_or_update_zombie(tc_name, container_name, short_id, reason, cpu_m, mem_m
         conn.close()
 
 
+def get_stopped_overrides(tc_name, config=None):
+    """
+    Return container names whose latest lifecycle status is STOPPED for this TC.
+    """
+    if not tc_name:
+        return set()
+
+    conn = _get_connection(config)
+    cursor = conn.cursor(dictionary=True)
+    try:
+        ensure_lifecycle_table(conn)
+        cursor.execute(
+            """
+            SELECT zl.container_name
+            FROM zombie_lifecycle zl
+            JOIN (
+                SELECT tc_name, container_name, MAX(id) AS max_id
+                FROM zombie_lifecycle
+                WHERE tc_name = %s
+                GROUP BY tc_name, container_name
+            ) latest
+              ON zl.id = latest.max_id
+            WHERE zl.tc_name = %s
+              AND zl.status = 'STOPPED'
+            """,
+            (tc_name, tc_name),
+        )
+        rows = cursor.fetchall()
+        return {str(r.get("container_name", "")).strip().lower() for r in rows if r.get("container_name")}
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def mark_recovered_pendings(tc_name, zombie_container_names, config):
-    """Mark pending lifecycle rows as recovered when they are no longer zombie."""
+    """Delete pending lifecycle rows when they are no longer zombie (simple approach)."""
     if not tc_name:
         return 0
 
@@ -341,12 +393,10 @@ def mark_recovered_pendings(tc_name, zombie_container_names, config):
         ensure_lifecycle_table(conn)
 
         if active_zombies:
+            # Delete rows that are no longer zombie
             placeholders = ", ".join(["%s"] * len(active_zombies))
             sql = f"""
-                UPDATE zombie_lifecycle
-                   SET status = 'RECOVERED',
-                       last_error = NULL,
-                       updated_at = UTC_TIMESTAMP()
+                DELETE FROM zombie_lifecycle
                  WHERE tc_name = %s
                    AND status = 'PENDING'
                    AND container_name NOT IN ({placeholders})
@@ -354,15 +404,9 @@ def mark_recovered_pendings(tc_name, zombie_container_names, config):
             params = [tc_name] + active_zombies
             cursor.execute(sql, params)
         else:
+            # No zombies - delete all pending for this TC
             cursor.execute(
-                """
-                UPDATE zombie_lifecycle
-                   SET status = 'RECOVERED',
-                       last_error = NULL,
-                       updated_at = UTC_TIMESTAMP()
-                 WHERE tc_name = %s
-                   AND status = 'PENDING'
-                """,
+                "DELETE FROM zombie_lifecycle WHERE tc_name = %s AND status = 'PENDING'",
                 (tc_name,),
             )
 
@@ -370,7 +414,7 @@ def mark_recovered_pendings(tc_name, zombie_container_names, config):
         conn.commit()
         return max(0, int(affected))
     except Exception as e:
-        print(f"❌ pending recover update failed: {e}")
+        print(f"❌ pending recover delete failed: {e}")
         return 0
     finally:
         cursor.close()
@@ -378,6 +422,19 @@ def mark_recovered_pendings(tc_name, zombie_container_names, config):
 
 
 def process_cleanup(config):
+    """DISABLED: Auto-cleanup is disabled. Containers can only be deleted via UI."""
+    # Return immediately - no automatic deletion
+    return {
+        "total": 0,
+        "deleted": 0,
+        "already_missing": 0,
+        "failed": 0,
+        "dry_run": True,
+        "disabled": True,
+    }
+
+
+def _process_cleanup_original(config):
     """Delete due pending zombies and update lifecycle status."""
     stats = {
         "total": 0,
@@ -521,6 +578,141 @@ def process_cleanup(config):
         conn.close()
 
 
+def list_pending_zombies(tc_name=None):
+    """List all pending zombies with full details for email notifications."""
+    conn = _get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if tc_name:
+            cursor.execute(
+                """
+                SELECT id, tc_name, container_name, short_id, status,
+                       detected_at, scheduled_delete_at, reason,
+                       cpu_m, mem_mi, net_b, wasted_cost
+                FROM zombie_lifecycle
+                WHERE status = 'PENDING' AND tc_name = %s
+                ORDER BY scheduled_delete_at ASC
+                """,
+                (tc_name,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, tc_name, container_name, short_id, status,
+                       detected_at, scheduled_delete_at, reason,
+                       cpu_m, mem_mi, net_b, wasted_cost
+                FROM zombie_lifecycle
+                WHERE status = 'PENDING'
+                ORDER BY scheduled_delete_at ASC
+                """
+            )
+        rows = cursor.fetchall()
+        # Normalize datetime fields
+        for row in rows:
+            row["detected_at"] = _normalize_db_datetime(row.get("detected_at"))
+            row["scheduled_delete_at"] = _normalize_db_datetime(row.get("scheduled_delete_at"))
+        return rows
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def get_zombie_by_id(zombie_id):
+    """Get a single zombie lifecycle record by ID."""
+    conn = _get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """
+            SELECT id, tc_name, container_name, short_id, status,
+                   detected_at, scheduled_delete_at, reason,
+                   cpu_m, mem_mi, net_b, wasted_cost
+            FROM zombie_lifecycle
+            WHERE id = %s
+            """,
+            (zombie_id,),
+        )
+        row = cursor.fetchone()
+        if row:
+            row["detected_at"] = _normalize_db_datetime(row.get("detected_at"))
+            row["scheduled_delete_at"] = _normalize_db_datetime(row.get("scheduled_delete_at"))
+        return row
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def stop_zombie(zombie_id, config=None):
+    """Mark a pending zombie as STOPPED (manual stop action)."""
+    zombie = get_zombie_by_id(zombie_id)
+    if not zombie:
+        return {"success": False, "error": "zombie not found"}
+
+    if zombie["status"] == "STOPPED":
+        return {
+            "success": True,
+            "container_name": zombie["container_name"],
+            "tc_name": zombie["tc_name"],
+            "status": "STOPPED",
+            "already_stopped": True,
+        }
+
+    if zombie["status"] != "PENDING":
+        return {"success": False, "error": f"zombie status is {zombie['status']}, not PENDING"}
+
+    conn = _get_connection(config)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            UPDATE zombie_lifecycle
+               SET status = 'STOPPED',
+                   updated_at = UTC_TIMESTAMP(),
+                   last_error = NULL
+             WHERE id = %s AND status = 'PENDING'
+            """,
+            (zombie_id,),
+        )
+        conn.commit()
+        if cursor.rowcount > 0:
+            return {
+                "success": True,
+                "container_name": zombie["container_name"],
+                "tc_name": zombie["tc_name"],
+                "status": "STOPPED",
+            }
+        return {"success": False, "error": "zombie not found or not pending"}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def postpone_zombie(zombie_id, minutes=30):
+    """Postpone zombie deletion by specified minutes."""
+    conn = _get_connection()
+    cursor = conn.cursor()
+    try:
+        new_scheduled = _utc_now_naive() + timedelta(minutes=minutes)
+        cursor.execute(
+            """
+            UPDATE zombie_lifecycle
+               SET scheduled_delete_at = %s,
+                   updated_at = UTC_TIMESTAMP()
+             WHERE id = %s AND status = 'PENDING'
+            """,
+            (new_scheduled, zombie_id),
+        )
+        conn.commit()
+        if cursor.rowcount > 0:
+            return {"success": True, "new_scheduled_at": new_scheduled.isoformat()}
+        return {"success": False, "error": "zombie not found or not pending"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def save_latest_scan_snapshot(tc_name, cycle_id, summary, rows):
     """
     Replace latest scan snapshot for a TC.
@@ -582,3 +774,89 @@ def save_latest_scan_snapshot(tc_name, cycle_id, summary, rows):
     finally:
         cursor.close()
         conn.close()
+
+
+def get_all_containers_with_status(tc_name=None):
+    """
+    Get all containers from latest scan combined with lifecycle status.
+    Returns containers with their current status (PENDING, ACTIVE, DELETED, etc.)
+    """
+    conn = _get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        # Get latest scan results
+        if tc_name:
+            cursor.execute(
+                """
+                SELECT tc_name, container_name, tc_container, cpu_m, mem_mi, net_b, 
+                       ctype, decision, reason, updated_at
+                FROM scan_latest_containers
+                WHERE tc_name = %s
+                ORDER BY container_name
+                """,
+                (tc_name,),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT tc_name, container_name, tc_container, cpu_m, mem_mi, net_b, 
+                       ctype, decision, reason, updated_at
+                FROM scan_latest_containers
+                ORDER BY tc_name, container_name
+                """
+            )
+        containers = cursor.fetchall()
+        
+        # Get lifecycle status for each container
+        for container in containers:
+            cursor.execute(
+                """
+                SELECT id, status, detected_at, scheduled_delete_at, short_id
+                FROM zombie_lifecycle
+                WHERE tc_name = %s AND container_name = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (container["tc_name"], container["container_name"]),
+            )
+            lifecycle = cursor.fetchone()
+            if lifecycle:
+                container["lifecycle_id"] = lifecycle["id"]
+                container["lifecycle_status"] = lifecycle["status"]
+                container["short_id"] = lifecycle["short_id"]
+                container["detected_at"] = lifecycle["detected_at"]
+                container["scheduled_delete_at"] = lifecycle["scheduled_delete_at"]
+            else:
+                container["lifecycle_id"] = None
+                container["lifecycle_status"] = None
+                container["short_id"] = None
+                container["detected_at"] = None
+                container["scheduled_delete_at"] = None
+        
+        return containers
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def remove_from_whitelist(tc_name, container_name):
+    """Remove a container from TC whitelist."""
+    target = get_registered_target(tc_name)
+    if not target:
+        return False, "target not found"
+    
+    labels = target.get("labels") or {}
+    if not isinstance(labels, dict):
+        labels = {}
+    
+    whitelist = labels.get("container_whitelist", [])
+    if not isinstance(whitelist, list):
+        whitelist = []
+    
+    container_lower = container_name.lower()
+    if container_lower in [w.lower() for w in whitelist]:
+        new_whitelist = [w for w in whitelist if w.lower() != container_lower]
+        labels["container_whitelist"] = new_whitelist
+        return update_target_labels(tc_name, labels), "removed"
+    
+    return True, "not in whitelist"

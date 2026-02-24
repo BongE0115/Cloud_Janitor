@@ -5,9 +5,22 @@ import argparse
 import requests
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 import re
+from datetime import datetime, timezone, timedelta
+
+# KST timezone
+KST = timezone(timedelta(hours=9))
+
+def to_kst(dt):
+    """Convert datetime to KST string."""
+    if dt is None:
+        return ""
+    if hasattr(dt, 'tzinfo') and dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    kst_dt = dt.astimezone(KST)
+    return kst_dt.strftime("%Y-%m-%d %H:%M:%S")
 
 # Add py_Logic to Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'py_Logic'))
@@ -24,6 +37,13 @@ try:
         delete_registered_target,
         get_registered_target,
         update_target_labels,
+        ensure_runtime_schema,
+        list_pending_zombies,
+        get_zombie_by_id,
+        postpone_zombie,
+        stop_zombie,
+        get_all_containers_with_status,
+        remove_from_whitelist,
     )
     from kubernetes import client, config as k8s_config
 except ImportError as e:
@@ -324,18 +344,31 @@ def build_config():
     return config
 
 
+def bootstrap_runtime_schema(config=None):
+    """Best-effort DB schema bootstrap for runtime alert queries."""
+    try:
+        ensure_runtime_schema(config)
+        print("[INFO] ensured runtime DB schema (zombie_lifecycle)")
+    except Exception as e:
+        print(f"[WARN] runtime schema ensure failed: {e}")
+
+
 def run_scan():
     """Run janitor scan."""
+    bootstrap_runtime_schema()
     config = build_config()
     if not config.get("SCAN_ENABLED"):
         print(f"[WARN] scan skipped: {config.get('SCAN_SKIP_REASON', 'target not ready')}")
         return
+    bootstrap_runtime_schema(config)
     run_janitor(config)
 
 
 def run_cleanup_cycle():
     """Run deferred cleanup cycle."""
+    bootstrap_runtime_schema()
     config = build_config()
+    bootstrap_runtime_schema(config)
     run_cleanup(config)
 
 
@@ -478,6 +511,9 @@ def register_tc(tc_info):
     
     if not tc_info.get("prometheus_url"):
         return {"error": "prometheus_url is required"}, 400
+
+    # Best-effort schema ensure for alert queries even before first scan.
+    bootstrap_runtime_schema()
     
     # Get K8s client
     v1, _ = get_k8s_client()
@@ -531,15 +567,8 @@ def build_loki_push_url(cj_host):
 def update_tc_whitelist(tc_name, payload):
     """Update TC container whitelist only."""
     whitelist = payload.get("container_whitelist")
-    if not isinstance(whitelist, list):
-        return {"error": "container_whitelist must be a list"}, 400
-
-    sanitized = []
-    for item in whitelist:
-        text = str(item).strip()
-        if text:
-            sanitized.append(text)
-
+    add_containers = payload.get("add_containers", [])
+    
     target = get_registered_target(tc_name)
     if not target:
         return {"error": f"target not found: {tc_name}"}, 404
@@ -547,7 +576,29 @@ def update_tc_whitelist(tc_name, payload):
     labels = target.get("labels") or {}
     if not isinstance(labels, dict):
         labels = {}
-    labels["container_whitelist"] = sanitized
+    
+    # Get existing whitelist
+    existing = labels.get("container_whitelist", [])
+    if not isinstance(existing, list):
+        existing = []
+    
+    # If add_containers is provided, merge with existing
+    if add_containers and isinstance(add_containers, list):
+        for item in add_containers:
+            text = str(item).strip().lower()
+            if text and text not in existing:
+                existing.append(text)
+        labels["container_whitelist"] = existing
+    elif whitelist is not None and isinstance(whitelist, list):
+        # Replace entire whitelist
+        sanitized = []
+        for item in whitelist:
+            text = str(item).strip()
+            if text:
+                sanitized.append(text)
+        labels["container_whitelist"] = sanitized
+    else:
+        return {"error": "container_whitelist or add_containers is required"}, 400
 
     if not update_target_labels(tc_name, labels):
         return {"error": "failed to update whitelist"}, 500
@@ -555,9 +606,118 @@ def update_tc_whitelist(tc_name, payload):
     return {
         "message": "whitelist updated",
         "tc_name": tc_name,
-        "container_whitelist": sanitized,
+        "container_whitelist": labels["container_whitelist"],
     }, 200
 
+
+def get_logs_from_loki(query, limit=50):
+    """Fetch logs from Loki."""
+    loki_url = os.getenv("LOKI_URL", "http://loki.monitoring.svc.cluster.local:3100")
+    
+    try:
+        # Calculate time range (last 1 hour)
+        end_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+        start_ns = end_ns - (60 * 60 * 1_000_000_000)  # 1 hour ago
+        
+        resp = requests.get(
+            f"{loki_url}/loki/api/v1/query_range",
+            params={
+                "query": query,
+                "start": str(start_ns),
+                "end": str(end_ns),
+                "limit": str(limit),
+            },
+            timeout=10
+        )
+        
+        if resp.status_code != 200:
+            return {"error": f"Loki returned {resp.status_code}", "logs": []}
+        
+        data = resp.json()
+        result = data.get("data", {}).get("result", [])
+        
+        logs = []
+        for stream in result:
+            values = stream.get("values", [])
+            for val in values:
+                if len(val) >= 2:
+                    timestamp_ns = int(val[0])
+                    timestamp = datetime.fromtimestamp(timestamp_ns / 1_000_000_000, tz=timezone.utc)
+                    logs.append({
+                        "time": timestamp.strftime("%H:%M:%S"),
+                        "message": val[1],
+                        "level": "info"  # Default level
+                    })
+        
+        # Sort by time (oldest first)
+        logs.reverse()
+        return {"logs": logs[:limit]}
+        
+    except Exception as e:
+        return {"error": str(e), "logs": []}
+
+
+def _escape_logql_label_value(value):
+    """Escape LogQL label string value."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def get_logs_for_container(container_name, limit=50):
+    """
+    Fetch logs for a specific container.
+    Try compose_service first, then container_name exact/suffix match.
+    """
+    name = str(container_name or "").strip()
+    if not name:
+        return {"error": "container_name parameter is required", "logs": []}
+
+    esc_name = _escape_logql_label_value(name)
+    esc_suffix = _escape_logql_label_value(f".*{re.escape(name)}$")
+    queries = [
+        f'{{job="tc-docker",compose_service="{esc_name}"}}',
+        f'{{job="tc-docker",container_name="{esc_name}"}}',
+        f'{{job="tc-docker",container_name=~"{esc_suffix}"}}',
+    ]
+
+    last_error = None
+    for q in queries:
+        result = get_logs_from_loki(q, limit)
+        if result.get("error"):
+            last_error = result["error"]
+            continue
+        if result.get("logs"):
+            return result
+
+    if last_error:
+        return {"error": last_error, "logs": []}
+    return {"logs": []}
+
+
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+_HTML_TEMPLATE_CACHE = {}
+
+
+def _load_html_template(template_name):
+    """Load HTML template from disk."""
+    base_dir = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(TEMPLATE_DIR, template_name),
+        os.path.join(base_dir, template_name),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+    raise FileNotFoundError(f"template not found: {template_name}")
+
+
+def _render_html_template(template_name, **values):
+    """Render HTML template with .format placeholders."""
+    template = _HTML_TEMPLATE_CACHE.get(template_name)
+    if template is None:
+        template = _load_html_template(template_name)
+        _HTML_TEMPLATE_CACHE[template_name] = template
+    return template.format(**values)
 
 class RequestHandler(BaseHTTPRequestHandler):
     def _send_json(self, status, payload):
@@ -567,6 +727,217 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_html(self, status, html):
+        body = html.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _render_containers_ui(self, message=""):
+        """Render all TC containers dashboard HTML."""
+        # Get all containers with status
+        containers = get_all_containers_with_status()
+        
+        # Get TC whitelist
+        tc_name = None
+        whitelist = set()
+        target = get_latest_registered_target()
+        if target:
+            tc_name = target.get("tc_name")
+            labels = target.get("labels") or {}
+            wl = labels.get("container_whitelist", [])
+            if isinstance(wl, list):
+                whitelist = {str(x).lower() for x in wl if x}
+        
+        # Separate containers into categories
+        pending_containers = []
+        stopped_containers = []
+        active_containers = []
+        whitelisted_containers = []
+        
+        for c in containers:
+            container_name = c.get("container_name", "").lower()
+            decision = c.get("decision", "")
+            decision_upper = str(decision).upper()
+            lifecycle_status = c.get("lifecycle_status")
+            
+            # Check if whitelisted
+            if container_name in whitelist:
+                c["is_whitelisted"] = True
+                whitelisted_containers.append(c)
+            else:
+                # PENDING = zombie candidate, STOPPED = manually stopped in UI or runtime stopped
+                if lifecycle_status == "PENDING":
+                    pending_containers.append(c)
+                elif lifecycle_status == "STOPPED" or "STOPPED" in decision_upper:
+                    stopped_containers.append(c)
+                else:
+                    active_containers.append(c)
+        
+        # Build HTML content
+        content_html = ""
+        
+        # Pending (Zombie) containers
+        content_html += "<h3 class='section-title'>🚨 Pending 삭제 (좀비 감지됨)</h3>"
+        if not pending_containers:
+            content_html += "<p class='empty'>삭제 예정인 컨테이너가 없습니다.</p>"
+        else:
+            content_html += self._build_container_table(pending_containers, tc_name, "pending", is_pending=True)
+        
+        # Stopped containers
+        content_html += "<h3 class='section-title'>⏸️ 멈춤 (STOPPED)</h3>"
+        if not stopped_containers:
+            content_html += "<p class='empty'>멈춤 처리된 컨테이너가 없습니다.</p>"
+        else:
+            content_html += self._build_container_table(stopped_containers, tc_name, "stopped", is_stopped=True)
+        
+        # Active containers
+        content_html += "<h3 class='section-title'>✅ 정상 작동 중</h3>"
+        if not active_containers:
+            content_html += "<p class='empty'>활성 컨테이너가 없습니다.</p>"
+        else:
+            content_html += self._build_container_table(active_containers, tc_name, "active", is_pending=False)
+        
+        # Whitelisted containers
+        content_html += "<h3 class='section-title'>🛡️ 화이트리스트</h3>"
+        if not whitelisted_containers:
+            content_html += "<p class='empty'>화이트리스트된 컨테이너가 없습니다.</p>"
+        else:
+            content_html += self._build_container_table(whitelisted_containers, tc_name, "whitelist", is_whitelisted=True)
+        
+        html = _render_html_template("containers.html", message=message, content=content_html)
+        self._send_html(200, html)
+    
+    def _build_container_table(self, containers, tc_name, section_prefix, is_pending=False, is_whitelisted=False, is_stopped=False):
+        """Build HTML table for containers."""
+        if not containers:
+            return ""
+        
+        rows_html = ""
+        for idx, c in enumerate(containers):
+            row_id = f"{section_prefix}-{idx}"
+            container_name = c.get("container_name", "")
+            lifecycle_id = c.get("lifecycle_id") or ""
+            lifecycle_status = (c.get("lifecycle_status") or "").upper()
+            decision = c.get("decision", "")
+            cpu = c.get("cpu_m", 0)
+            mem = c.get("mem_mi", 0)
+            net = c.get("net_b", 0)
+            reason = c.get("reason", "")
+            
+            # Status badge
+            if is_whitelisted:
+                status_html = "<span class='status-whitelisted'>WHITELISTED</span>"
+            elif lifecycle_status == "STOPPED" or is_stopped:
+                status_html = "<span class='status-stopped'>⏸️ STOPPED</span>"
+            elif decision and "STOPPED" in str(decision).upper():
+                status_html = "<span class='status-stopped'>⏸️ STOPPED</span>"
+            elif lifecycle_status == "PENDING":
+                if decision:
+                    decision = str(decision).strip()
+                    if decision.startswith("🚨"):
+                        decision = decision[1:].strip()
+                    status_html = f"<span class='status-pending'>🚨 {decision.upper()}</span>"
+                else:
+                    status_html = "<span class='status-pending'>🚨 PENDING</span>"
+            elif decision:
+                if decision == "active":
+                    status_html = f"<span class='status-active'>✅ {decision.upper()}</span>"
+                else:
+                    status_html = f"<span>{decision.upper()}</span>"
+            else:
+                status_html = "<span class='status-active'>ACTIVE</span>"
+            
+            # Action buttons
+            actions_html = ""
+            if is_whitelisted:
+                actions_html = f'''<button class="btn btn-unwhitelist" onclick="removeFromWhitelist('{tc_name}', '{container_name}', '{row_id}', event);">🔓 화이트리스트 제거</button>'''
+            elif is_pending and lifecycle_id:
+                actions_html = f'''
+                    <button class="btn btn-stop" onclick="stopContainer('{lifecycle_id}', '{row_id}', event);">⏸️ 멈춤</button>
+                    <button class="btn btn-whitelist" onclick="addToWhitelist('{tc_name}', '{container_name}', '{row_id}', event);">🛡️ 화이트리스트</button>
+                '''
+            else:
+                actions_html = f'''<button class="btn btn-whitelist" onclick="addToWhitelist('{tc_name}', '{container_name}', '{row_id}', event);">🛡️ 화이트리스트</button>'''
+            
+            rows_html += f'''
+            <tr class="clickable-row" onclick="toggleLog('{row_id}', '{tc_name}', '{container_name}', event)" data-row-id="{row_id}">
+                <td>{container_name}</td>
+                <td class="metrics">{cpu:.2f}</td>
+                <td class="metrics">{mem:.2f}</td>
+                <td class="metrics">{net:.2f}</td>
+                <td>{status_html}</td>
+                <td onclick="event.stopPropagation()">{actions_html}</td>
+            </tr>
+            <tr id="log-row-{row_id}" class="log-row">
+                <td colspan="6" style="padding:0;">
+                    <div id="log-{row_id}" class="log-panel">
+                        <div class="log-content"></div>
+                    </div>
+                </td>
+            </tr>
+            '''
+        
+        return f'''
+        <table>
+            <thead>
+                <tr>
+                    <th>Container</th>
+                    <th>CPU (m)</th>
+                    <th>MEM (Mi)</th>
+                    <th>NET (B)</th>
+                    <th>상태</th>
+                    <th>액션</th>
+                </tr>
+            </thead>
+            <tbody>
+                {rows_html}
+            </tbody>
+        </table>
+        '''
+
+    def _render_zombies_ui(self, message=""):
+        """Render zombie management dashboard HTML."""
+        zombies = list_pending_zombies()
+        
+        if not zombies:
+            rows_html = "<tr><td colspan='8' class='empty'>🎉 삭제 예정인 좀비 컨테이너가 없습니다.</td></tr>"
+        else:
+            rows_html = ""
+            for z in zombies:
+                scheduled = to_kst(z.get("scheduled_delete_at"))
+                z_id = z.get('id', '')
+                tc_name = z.get('tc_name', '')
+                container_name = z.get('container_name', '')
+                reason = z.get('reason', '')
+                rows_html += f"""
+                <tr class="clickable-row" onclick="toggleLog('{z_id}', '{tc_name}', '{container_name}', event)" data-zombie-id="{z_id}">
+                    <td>{z_id}</td>
+                    <td><strong>{tc_name}</strong>/{container_name}</td>
+                    <td class="metrics">{z.get('cpu_m', 0):.2f}</td>
+                    <td class="metrics">{z.get('mem_mi', 0):.2f}</td>
+                    <td class="metrics">{z.get('net_b', 0):.2f}</td>
+                    <td>{scheduled}</td>
+                    <td class="status-pending">{z.get('status', '')}</td>
+                    <td onclick="event.stopPropagation()">
+                        <button class="btn btn-whitelist" onclick="addToWhitelist('{z_id}', '{tc_name}', '{container_name}', event);">🛡️ 화이트리스트</button>
+                        <button class="btn btn-stop" onclick="stopZombie('{z_id}', event);">⏸️ 멈춤</button>
+                    </td>
+                </tr>
+                <tr id="log-row-{z_id}" class="log-row">
+                    <td colspan="8" style="padding:0;">
+                        <div id="log-{z_id}" class="log-panel">
+                            <div class="log-content"></div>
+                        </div>
+                    </td>
+                </tr>
+                """
+        
+        html = _render_html_template("zombies.html", message=message, rows=rows_html)
+        self._send_html(200, html)
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -583,6 +954,118 @@ class RequestHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send_json(500, {"error": str(e)})
             return
+        if path == "/api/v1/zombies":
+            try:
+                config = build_config()
+                zombies = list_pending_zombies()
+                base_url = os.getenv("CJ_BASE_URL", f"http://{self.headers.get('Host', 'localhost:8000')}")
+                result = []
+                for z in zombies:
+                    z["action_urls"] = {
+                        "stop": f"{base_url}/api/v1/zombies/{z['id']}/stop",
+                        "postpone_30m": f"{base_url}/api/v1/zombies/{z['id']}/postpone?minutes=30",
+                        "postpone_1h": f"{base_url}/api/v1/zombies/{z['id']}/postpone?minutes=60",
+                        "postpone_24h": f"{base_url}/api/v1/zombies/{z['id']}/postpone?minutes=1440",
+                    }
+                    result.append(z)
+                self._send_json(200, {"count": len(result), "zombies": result})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+        
+        # GET /api/v1/zombies/<id>
+        match = re.fullmatch(r"/api/v1/zombies/(\d+)", path)
+        if match:
+            try:
+                zombie_id = int(match.group(1))
+                zombie = get_zombie_by_id(zombie_id)
+                if not zombie:
+                    self._send_json(404, {"error": "zombie not found"})
+                    return
+                base_url = os.getenv("CJ_BASE_URL", f"http://{self.headers.get('Host', 'localhost:8000')}")
+                zombie["action_urls"] = {
+                    "stop": f"{base_url}/api/v1/zombies/{zombie['id']}/stop",
+                    "postpone_30m": f"{base_url}/api/v1/zombies/{zombie['id']}/postpone?minutes=30",
+                }
+                self._send_json(200, zombie)
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+        
+        # GET /api/v1/logs - Fetch logs from Loki
+        if path == "/api/v1/logs":
+            try:
+                parsed_url = urlparse(self.path)
+                query_params = parse_qs(parsed_url.query or "", keep_blank_values=False)
+                query = (query_params.get("query", [""])[0] or "").strip()
+                container_name = (query_params.get("container_name", [""])[0] or "").strip()
+                try:
+                    limit = int((query_params.get("limit", ["50"])[0] or "50").strip())
+                except ValueError:
+                    limit = 50
+                
+                if container_name:
+                    result = get_logs_for_container(container_name, limit)
+                elif query:
+                    result = get_logs_from_loki(query, limit)
+                else:
+                    self._send_json(400, {"error": "query or container_name parameter is required"})
+                    return
+                self._send_json(200, result)
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+        
+        # ── Web UI for Zombie Management (GET requests for email links) ──
+        
+        # GET /ui/zombies - 웹 대시보드
+        if path == "/ui/zombies":
+            try:
+                self._render_zombies_ui(message="")
+            except Exception as e:
+                self._send_html(500, f"<h1>Error</h1><p>{str(e)}</p>")
+            return
+        
+        # GET /ui/zombies/<id>/stop - 이메일 링크용 (정식)
+        match = re.fullmatch(r"/ui/zombies/(\d+)/stop", path)
+        if match:
+            try:
+                zombie_id = int(match.group(1))
+                config = build_config()
+                result = stop_zombie(zombie_id, config)
+                if result.get("success"):
+                    self._render_zombies_ui(f"<div class='result-msg result-success'>✅ 컨테이너 멈춤 처리 완료: {result.get('container_name', '')}</div>")
+                else:
+                    self._render_zombies_ui(f"<div class='result-msg result-error'>❌ 멈춤 처리 실패: {result.get('error', 'unknown error')}</div>")
+            except Exception as e:
+                self._render_zombies_ui(f"<div class='result-msg result-error'>❌ 오류: {str(e)}</div>")
+            return
+        
+        # GET /ui/zombies/<id>/postpone - 이메일 링크용
+        match = re.fullmatch(r"/ui/zombies/(\d+)/postpone", path)
+        if match:
+            try:
+                zombie_id = int(match.group(1))
+                parsed_url = urlparse(self.path)
+                query = dict(pair.split('=') for pair in parsed_url.query.split('&') if '=' in pair) if parsed_url.query else {}
+                minutes = int(query.get('minutes', 30))
+                result = postpone_zombie(zombie_id, minutes)
+                if result.get("success"):
+                    self._render_zombies_ui(f"<div class='result-msg result-success'>✅ {minutes}분 연기 완료</div>")
+                else:
+                    self._render_zombies_ui(f"<div class='result-msg result-error'>❌ 연기 실패: {result.get('error', 'unknown error')}</div>")
+            except Exception as e:
+                self._render_zombies_ui(f"<div class='result-msg result-error'>❌ 오류: {str(e)}</div>")
+            return
+        
+        # GET /ui/containers - 모든 TC 컨테이너 대시보드
+        if path == "/ui/containers":
+            try:
+                self._render_containers_ui(message="")
+            except Exception as e:
+                self._send_html(500, f"<h1>Error</h1><p>{str(e)}</p>")
+            return
+        
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -620,6 +1103,62 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._send_json(status, result)
             return
         
+        # POST /api/v1/targets/<tc_name>/whitelist/remove - 화이트리스트에서 제거
+        match = re.fullmatch(r"/api/v1/targets/([^/]+)/whitelist/remove", path)
+        if match:
+            tc_name = match.group(1)
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                raw = self.rfile.read(length) if length > 0 else b""
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                self._send_json(400, {"error": "invalid json"})
+                return
+            
+            container_name = payload.get("container_name")
+            if not container_name:
+                self._send_json(400, {"error": "container_name is required"})
+                return
+            
+            success, msg = remove_from_whitelist(tc_name, container_name)
+            if success:
+                self._send_json(200, {"message": msg, "tc_name": tc_name, "container_name": container_name})
+            else:
+                self._send_json(400, {"error": msg})
+            return
+        
+        # POST /api/v1/zombies/<id>/stop - 멈춤 처리 (정식)
+        match = re.fullmatch(r"/api/v1/zombies/(\d+)/stop", path)
+        if match:
+            try:
+                zombie_id = int(match.group(1))
+                config = build_config()
+                result = stop_zombie(zombie_id, config)
+                if result.get("success"):
+                    self._send_json(200, {"message": "container stopped", **result})
+                else:
+                    self._send_json(400, {"error": result.get("error", "stop failed")})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+        
+        # POST /api/v1/zombies/<id>/postpone - 삭제 연기
+        match = re.fullmatch(r"/api/v1/zombies/(\d+)/postpone", path)
+        if match:
+            try:
+                zombie_id = int(match.group(1))
+                parsed_url = urlparse(self.path)
+                query = dict(pair.split('=') for pair in parsed_url.query.split('&') if '=' in pair) if parsed_url.query else {}
+                minutes = int(query.get('minutes', 30))
+                result = postpone_zombie(zombie_id, minutes)
+                if result.get("success"):
+                    self._send_json(200, {"message": f"postponed by {minutes} minutes", **result})
+                else:
+                    self._send_json(400, {"error": result.get("error", "postpone failed")})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+        
         self._send_json(404, {"error": "not found"})
 
     def do_DELETE(self):
@@ -630,6 +1169,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def serve():
     """Start HTTP server."""
+    bootstrap_runtime_schema()
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
     httpd = ThreadingHTTPServer((host, port), RequestHandler)

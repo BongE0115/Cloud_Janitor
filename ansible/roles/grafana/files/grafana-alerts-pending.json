@@ -2,9 +2,9 @@
   "uid": "pending-alerts",
   "title": "좀비 컨테이너 삭제 예정",
   "ruleGroup": "CloudJanitorAlerts",
-  "folderUID": "cloud-janitor",
+  "folderUID": "",
   "condition": "C",
-  "for": "1m",
+  "for": "0s",
   "noDataState": "OK",
   "execErrState": "Error",
   "labels": {
@@ -14,7 +14,7 @@
   },
   "annotations": {
     "summary": "[Cloud Janitor] 삭제 예정 컨테이너 감지",
-    "description": "현재 삭제 예정(PENDING) 컨테이너가 {{ $values.B.Value }}개 감지되었습니다."
+    "description": "삭제 예정(PENDING) 컨테이너가 {{ $values.B.Value }}개 감지되었습니다.\n\n📋 상세 목록:\n{{ $values.D.Value }}\n\n🔗 액션 URL:\n{{ $values.E.Value }}"
   },
   "data": [
     {
@@ -51,6 +51,46 @@
             "type": "query"
           }
         ]
+      }
+    },
+    {
+      "refId": "D",
+      "datasourceUid": "__MYSQL_DS_UID__",
+      "relativeTimeRange": { "from": 600, "to": 0 },
+      "model": {
+        "format": "table",
+        "instant": true,
+        "rawSql": "SELECT GROUP_CONCAT(CONCAT('\\n• [', id, '] ', tc_name, '/', container_name, ' | CPU:', cpu_m, 'm | MEM:', mem_mi, 'Mi | NET:', net_b, 'B | 예정:', scheduled_delete_at) SEPARATOR '') AS details FROM zombie_lifecycle WHERE status='PENDING' ORDER BY scheduled_delete_at ASC LIMIT 10;"
+      }
+    },
+    {
+      "refId": "D1",
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "reduce",
+        "expression": "D",
+        "reducer": "last",
+        "settings": { "mode": "dropNN" }
+      }
+    },
+    {
+      "refId": "E",
+      "datasourceUid": "__MYSQL_DS_UID__",
+      "relativeTimeRange": { "from": 600, "to": 0 },
+      "model": {
+        "format": "table",
+        "instant": true,
+        "rawSql": "SELECT GROUP_CONCAT(CONCAT('\\n[', id, '] 멈춤: http://YOUR_CJ_HOST:30800/ui/zombies/', id, '/stop | 연기(30m): http://YOUR_CJ_HOST:30800/ui/zombies/', id, '/postpone?minutes=30') SEPARATOR '') AS urls FROM zombie_lifecycle WHERE status='PENDING' ORDER BY scheduled_delete_at ASC LIMIT 10;"
+      }
+    },
+    {
+      "refId": "E1",
+      "datasourceUid": "__expr__",
+      "model": {
+        "type": "reduce",
+        "expression": "E",
+        "reducer": "last",
+        "settings": { "mode": "dropNN" }
       }
     }
   ]

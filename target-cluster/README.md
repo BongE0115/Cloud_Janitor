@@ -6,10 +6,10 @@ Target Cluster(TC)는 Cloud Janitor의 모니터링 대상인 오래된 시스�
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  TC (Target Cluster) - 오래된 시스템                │
-│  - Docker Compose로 구성                                  │
-│  - Prometheus + 기존 프로세스들                        │
-│  - cj에 연결 요청 전송                                    │
+│  TC (Target Cluster)                                       │
+│  - docker-compose.yml: TC 앱 컨테이너 전용                │
+│  - docker-compose.monitoring.yml: CJ 연동 브리지 전용     │
+│  - tc connect: CJ 등록 API 호출                            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -17,29 +17,50 @@ Target Cluster(TC)는 Cloud Janitor의 모니터링 대상인 오래된 시스�
 
 ```
 target-cluster/
-├── docker-compose.yml    # Docker Compose 설정
-├── prometheus.yml       # Prometheus 설정
-├── setup.sh           # TC 시작 스크립트
-├── teardown.sh        # TC 중지 스크립트
-└── README.md          # 이 파일
+├── docker-compose.yml              # TC 앱 컨테이너 전용
+├── docker-compose.monitoring.yml   # Prometheus/cAdvisor/Promtail
+├── prometheus.yml                  # Prometheus 설정
+├── promtail-config.yaml            # Promtail 설정
+├── setup.sh                        # TC 시작 스크립트
+├── setup-connection-to-cj.sh       # TC -> CJ 연결 요청
+├── teardown.sh                     # TC 중지 스크립트
+└── tc                              # TC CLI
 ```
 
 ## 사용법
 
-### TC 시작
+### 1) TC 앱 시작 (CJ와 무관)
 
 ```bash
-# 기본 시작
+# 기본값: 앱 컨테이너만 실행
 ./setup.sh
 
-# 이미지 pull 없이 시작
-./setup.sh --no-pull
+# 또는
+./setup.sh --apps-only
+# 또는
+./tc start
 ```
 
-### TC 중지
+### 2) 연동 브리지 시작 (Prometheus/cAdvisor/Promtail)
 
 ```bash
-# 컨테이너만 중지
+./setup.sh --prometheus-only
+# 또는
+./tc pm start
+```
+
+### 3) TC -> CJ 연결 요청
+
+```bash
+./setup-connection-to-cj.sh -a <CJ_HOST>
+# 또는
+./tc connect -a <CJ_HOST>
+```
+
+## 중지/정리
+
+```bash
+# 컨테이너 중지
 ./teardown.sh
 
 # 볼륨까지 삭제
@@ -49,71 +70,49 @@ target-cluster/
 ./teardown.sh --all
 ```
 
-### 서비스
+## 서비스
 
-| 서비스 | URL | 설명 |
-|--------|------|------|
-| Prometheus | http://localhost:9091 | 메트릭 수집 |
-| cAdvisor | http://localhost:8080 | 컨테이너 메트릭 |
-| Active App | http://localhost:8081 | 정상 동작 앱 |
-| Zombie Test App | http://localhost:8082 | 좀비 테스트 앱 |
+### 앱 스택
 
-## 연결 요청 (TC → cj)
+| 서비스 | URL |
+|--------|-----|
+| Active App | http://localhost:8081 |
+| Zombie Test App | http://localhost:8082 |
 
-TC가 cj(Cloud Janitor)에 연결 요청을 전송하려면:
+### 연동 브리지 스택
 
-```bash
-# cj 배포 후
-cd ..
-
-# TC → cj 연결 요청 전송
-./target-cluster/setup-connection-to-cj.sh -a localhost
-```
+| 서비스 | URL |
+|--------|-----|
+| Prometheus | http://localhost:9091 |
+| cAdvisor | http://localhost:8080 |
+| Promtail | (로그 전송용, 별도 UI 없음) |
 
 ## 문제 해결
 
 ### 포트 충돌
 
 ```bash
-# 사용 중인 포트 확인
 lsof -i :9091
 lsof -i :8080
 lsof -i :8081
 lsof -i :8082
 ```
 
-### 컨테이너 로그 확인
+### 컨테이너 로그
 
 ```bash
-# Prometheus 로그
-docker logs -f target-prometheus
+# 전체
+./tc logs
 
-# cAdvisor 로그
-docker logs -f cadvisor
-
-# 특정 컨테이너 로그
-docker logs -f <container_name>
+# 특정 서비스
+./tc logs promtail
+./tc logs prometheus
+./tc logs app-active
 ```
 
 ### 네트워크 확인
 
 ```bash
-# Docker 네트워크 확인
 docker network ls | grep tc-network
-
-# 네트워크 상세 정보
 docker network inspect tc-network
 ```
-
-## 좀비 컨테이너
-
-TC에는 테스트용 좀비 컨테이너가 포함되어 있습니다:
-
-| 컨테이너 | 설명 |
-|-----------|------|
-| app-zombie-sleeper | CPU/네트워크 미사용 |
-| app-zombie-completed | 작업 완료 후 대기 |
-| app-zombie-test | 테스트 환경 방치 |
-| app-zombie-dev | 개발 환경 방치 |
-
-Cloud Janitor(cj)가 이 컨테이너들을 자동으로 감지하고 삭제합니다.

@@ -1,8 +1,11 @@
 import logging
+import shutil
+import subprocess
 import time
 from .metrics import get_prom_val, get_docker_containers_fallback
 from .database import (
     add_or_update_zombie,
+    get_stopped_overrides,
     mark_recovered_pendings,
     process_cleanup,
     save_latest_scan_snapshot,
@@ -11,6 +14,85 @@ from .database import (
 # 로그 기록 방식 설정
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("SuperJanitor")
+
+
+def get_runtime_state_map(config, container_map):
+    """
+    Return runtime state for tracked short IDs.
+    Priority: Docker SDK -> docker CLI fallback.
+    """
+    short_ids = [str(sid).strip() for sid in (container_map or {}).keys() if str(sid).strip()]
+    if not short_ids:
+        return {}
+
+    state_map = {}
+    docker_url = config.get("DOCKER_API_URL", "unix:///var/run/docker.sock")
+
+    # Prefer Docker SDK (respects DOCKER_API_URL).
+    try:
+        import docker
+        client = docker.DockerClient(base_url=docker_url)
+        try:
+            for sid in short_ids:
+                try:
+                    c = client.containers.get(sid)
+                    state = ((c.attrs or {}).get("State") or {}).get("Status") or c.status or ""
+                    state_map[sid] = {
+                        "state": str(state).lower(),
+                        "name": getattr(c, "name", "") or "",
+                    }
+                except Exception as e:
+                    msg = str(e).lower()
+                    if "not found" in msg or "404" in msg:
+                        state_map[sid] = {"state": "not_found", "name": ""}
+                    else:
+                        logger.debug("RUNTIME_STATE_LOOKUP_FAILED sid=%s error=%s", sid, str(e))
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+        if state_map:
+            return state_map
+    except Exception as e:
+        logger.debug("RUNTIME_STATE_DOCKER_SDK_UNAVAILABLE error=%s", str(e))
+
+    # Fallback: docker CLI (local daemon only).
+    if not shutil.which("docker"):
+        return {}
+
+    try:
+        cli = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.ID}}|{{.State}}|{{.Names}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if cli.returncode != 0:
+            logger.debug("RUNTIME_STATE_DOCKER_CLI_FAILED error=%s", (cli.stderr or "").strip())
+            return {}
+
+        by_short = {}
+        for raw in (cli.stdout or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            parts = line.split("|", 2)
+            if len(parts) != 3:
+                continue
+            cid, state, name = parts[0].strip(), parts[1].strip().lower(), parts[2].strip()
+            if not cid:
+                continue
+            by_short[cid[:12]] = {"state": state, "name": name}
+
+        for sid in short_ids:
+            state_map[sid] = by_short.get(sid, {"state": "not_found", "name": ""})
+        return state_map
+    except Exception as e:
+        logger.debug("RUNTIME_STATE_DOCKER_CLI_EXCEPTION error=%s", str(e))
+        return {}
 
 
 def run_janitor(config):
@@ -62,6 +144,8 @@ def run_janitor(config):
             "cpu": float(metric.get("cpu", 0.0)),
             "mem": float(metric.get("mem", 0.0)),
             "net": float(metric.get("net", 0.0)),
+            "iops_read": float(metric.get("iops_read", 0.0)),
+            "iops_write": float(metric.get("iops_write", 0.0)),
             "type": metric.get("type") or meta.get("type") or "unknown",
             "zombie_type": metric.get("zombie_type") or meta.get("zombie_type") or "",
         })
@@ -76,9 +160,16 @@ def run_janitor(config):
     zombie_count = 0
     candidate_count = 0
     active_count = 0
+    stopped_count = 0
     safe_count = 0
     snapshot_rows = []
     zombie_container_names = set()
+    runtime_states = get_runtime_state_map(config, container_map)
+    stopped_overrides = set()
+    try:
+        stopped_overrides = get_stopped_overrides(tc_name, config)
+    except Exception as e:
+        logger.warning("STOPPED_OVERRIDE_LOAD_FAILED tc=%s error=%s", _q(tc_name), _q(str(e)))
     
     for container in containers:
         name = container['name']
@@ -86,12 +177,17 @@ def run_janitor(config):
         cpu_val = container['cpu']
         mem_val = container['mem']
         net_val = container['net']
+        # IOPS = I/O Operations Per Second
+        iops_read = container.get('iops_read', 0.0)
+        iops_write = container.get('iops_write', 0.0)
+        iops_val = iops_read + iops_write  # Total IOPS
         app_type = container.get('type', '')
         zombie_type = container.get('zombie_type', '')
         type_str = f"{app_type}/{zombie_type}" if zombie_type else app_type
         display_name = f"{tc_name}/{name}"
         alias = container_map.get(short_id, {}) if short_id else {}
         alias_name = alias.get('name') if isinstance(alias, dict) else None
+        alias_state = str((alias or {}).get("state") or "").lower() if isinstance(alias, dict) else ""
         if alias_name:
             display_name = f"{tc_name}/{alias_name}"
             if app_type == 'unknown':
@@ -100,6 +196,43 @@ def run_janitor(config):
                 type_str = f"{app_type}/{zombie_type}" if zombie_type else app_type
         if not app_type and short_id:
             display_name = f"{tc_name}/{short_id}"
+
+        runtime_state = str((runtime_states.get(short_id) or {}).get("state") or "").lower()
+        if not runtime_state:
+            runtime_state = alias_state
+        is_stopped_state = runtime_state in {"exited", "dead", "created", "removing", "not_found"}
+        if is_stopped_state:
+            decision = "⏸️ STOPPED"
+            if runtime_state == "not_found":
+                reason = "container not running (not found)"
+            else:
+                reason = f"container not running (state={runtime_state})"
+            stopped_count += 1
+            snapshot_rows.append({
+                "container_name": alias_name or name,
+                "tc_container": display_name,
+                "cpu_m": cpu_val,
+                "mem_mi": mem_val,
+                "net_b": net_val,
+                "ctype": type_str or "unknown",
+                "decision": decision,
+                "reason": reason,
+            })
+            print(f"{display_name:<38} {cpu_val:>10.2f} {mem_val:>10.2f} {net_val:>10.2f} {type_str:<15} {decision:<30} {reason}")
+            logger.info(
+                "SCAN_CONTAINER cycle=%s tc=%s container=%s tc_container=%s cpu_m=%.2f mem_mi=%.2f net_b=%.2f ctype=%s decision=%s reason=%s",
+                cycle_id,
+                _q(tc_name),
+                _q(alias_name or name),
+                _q(display_name),
+                cpu_val,
+                mem_val,
+                net_val,
+                _q(type_str or "unknown"),
+                _q("STOPPED"),
+                _q(reason),
+            )
+            continue
 
         # TC-side whitelist: do not treat system containers as zombie/candidate.
         effective_name = (alias_name or name or "").lower()
@@ -132,32 +265,65 @@ def run_janitor(config):
                 _q(reason),
             )
             continue
-        
+
+        # Manual STOPPED override in UI: do not requeue as PENDING on scan.
+        if effective_name in stopped_overrides:
+            decision = "⏸️ STOPPED"
+            reason = "manual stop override"
+            stopped_count += 1
+            snapshot_rows.append({
+                "container_name": alias_name or name,
+                "tc_container": display_name,
+                "cpu_m": cpu_val,
+                "mem_mi": mem_val,
+                "net_b": net_val,
+                "ctype": type_str or "unknown",
+                "decision": decision,
+                "reason": reason,
+            })
+            print(f"{display_name:<38} {cpu_val:>10.2f} {mem_val:>10.2f} {net_val:>10.2f} {type_str:<15} {decision:<30} {reason}")
+            logger.info(
+                "SCAN_CONTAINER cycle=%s tc=%s container=%s tc_container=%s cpu_m=%.2f mem_mi=%.2f net_b=%.2f ctype=%s decision=%s reason=%s",
+                cycle_id,
+                _q(tc_name),
+                _q(alias_name or name),
+                _q(display_name),
+                cpu_val,
+                mem_val,
+                net_val,
+                _q(type_str or "unknown"),
+                _q("STOPPED"),
+                _q(reason),
+            )
+            continue
+
         # Decision logic for TC Docker containers
-        # Zombie: app-type=zombie label AND low CPU AND low network
-        if app_type == 'zombie':
-            if cpu_val < config['LIMIT_CPU_M'] and net_val < config['LIMIT_NET_B']:
-                decision = "🚨 ZOMBIE DETECTED"
-                reason = f"label=zombie && cpu<{config['LIMIT_CPU_M']} && net<{config['LIMIT_NET_B']}"
-                zombie_count += 1
-            else:
-                decision = "👍 ACTIVE (zombie but active)"
-                reason = f"label=zombie but cpu/net above threshold"
-                active_count += 1
-        elif app_type == 'active':
-            decision = "✅ ACTIVE (normal app)"
-            reason = "label=active"
-            active_count += 1
+        # Policy-based detection: CPU / IOPS ratio near zero = Zombie
+        # If CPU is low AND IOPS is low, the container is doing nothing
+        # Formula: CPU/IOPS ≈ 0 means zombie (no work being done)
+        
+        # Get IOPS threshold (default 1 operation per second)
+        limit_iops = float(config.get('LIMIT_IOPS', 1.0))
+        
+        # Zombie conditions: CPU <= 1m AND IOPS < threshold
+        zombie_cpu_threshold = 1.0  # 1 millicore = almost no CPU usage
+        is_very_low_cpu = cpu_val <= zombie_cpu_threshold
+        is_low_iops = iops_val < limit_iops
+        
+        # Zombie = very low CPU AND low IOPS (truly idle containers)
+        if is_very_low_cpu and is_low_iops:
+            decision = "🚨 ZOMBIE DETECTED"
+            reason = f"cpu<={zombie_cpu_threshold}m(actual:{cpu_val:.1f}m) && iops<{limit_iops}(actual:{iops_val:.2f}/s)"
+            zombie_count += 1
         else:
-            # Unknown containers - check by metrics only
-            if cpu_val < config['LIMIT_CPU_M'] and net_val < config['LIMIT_NET_B']:
-                decision = "🔍 CANDIDATE (low metrics)"
-                reason = f"cpu<{config['LIMIT_CPU_M']} && net<{config['LIMIT_NET_B']}"
-                candidate_count += 1
-            else:
-                decision = "👍 ACTIVE"
-                reason = "metrics above threshold"
-                active_count += 1
+            decision = "✅ ACTIVE"
+            active_metrics = []
+            if not is_very_low_cpu:
+                active_metrics.append(f"cpu={cpu_val:.1f}m")
+            if not is_low_iops:
+                active_metrics.append(f"iops={iops_val:.2f}/s")
+            reason = "active: " + ", ".join(active_metrics) if active_metrics else "at threshold"
+            active_count += 1
         
         # Print result line (this goes to Loki)
         snapshot_rows.append({
@@ -185,8 +351,9 @@ def run_janitor(config):
             _q(reason),
         )
         
-        # Register pending lifecycle row; actual deletion is handled by cleanup job.
-        if decision == "🚨 ZOMBIE DETECTED" and not config['DRY_RUN']:
+        # Register pending lifecycle row; actual deletion is ONLY done via UI action.
+        # Auto-cleanup is disabled - user must explicitly delete via UI.
+        if decision == "🚨 ZOMBIE DETECTED":
             pending_name = alias_name or name
             zombie_container_names.add(str(pending_name))
             lifecycle_saved = add_or_update_zombie(
@@ -225,17 +392,18 @@ def run_janitor(config):
             )
     
     print("-" * 150)
-    logger.info(f"📊 Summary: {zombie_count} zombies, {candidate_count} candidates, {active_count} active, {safe_count} safe")
+    logger.info(f"📊 Summary: {zombie_count} zombies, {candidate_count} candidates, {active_count} active, {stopped_count} stopped, {safe_count} safe")
     logger.info(
-        f"SUMMARY_METRICS zombie={zombie_count} candidate={candidate_count} active={active_count} safe={safe_count}"
+        f"SUMMARY_METRICS zombie={zombie_count} candidate={candidate_count} active={active_count} stopped={stopped_count} safe={safe_count}"
     )
     logger.info(
-        "SCAN_CYCLE_END cycle=%s tc=%s zombie=%s candidate=%s active=%s safe=%s",
+        "SCAN_CYCLE_END cycle=%s tc=%s zombie=%s candidate=%s active=%s stopped=%s safe=%s",
         cycle_id,
         _q(tc_name),
         zombie_count,
         candidate_count,
         active_count,
+        stopped_count,
         safe_count,
     )
 
@@ -247,6 +415,7 @@ def run_janitor(config):
                 "zombie": zombie_count,
                 "candidate": candidate_count,
                 "active": active_count,
+                "stopped": stopped_count,
                 "safe": safe_count,
             },
             rows=snapshot_rows,

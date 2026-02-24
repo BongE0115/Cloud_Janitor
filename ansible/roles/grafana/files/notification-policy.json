@@ -1,13 +1,16 @@
 {
   "receiver": "email-cloud-janitor",
   "group_by": ["alertname", "tc_name", "container_name"],
-  "group_wait": "__ALERT_GROUP_WAIT__",
-  "group_interval": "__ALERT_GROUP_INTERVAL__",
-  "repeat_interval": "__ALERT_REPEAT_INTERVAL__",
   "routes": [
     {
       "receiver": "email-cloud-janitor",
-      "object_matchers": [["team", "=", "cloud-janitor"]]
+      "object_matchers": [["team", "=", "cloud-janitor"]],
+      "group_wait": "0s",
+      "group_interval": "1m",
+      "repeat_interval": "24h"
     }
-  ]
+  ],
+  "group_wait": "0s",
+  "group_interval": "1m",
+  "repeat_interval": "24h"
 }

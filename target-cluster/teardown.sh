@@ -92,6 +92,30 @@ cd "$SCRIPT_DIR"
 
 log_info "작업 디렉토리: $SCRIPT_DIR"
 
+APP_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+MONITOR_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.monitoring.yml"
+COMPOSE_FILE_ARGS=()
+
+if [ -f "$APP_COMPOSE_FILE" ]; then
+    COMPOSE_FILE_ARGS+=(-f "$APP_COMPOSE_FILE")
+fi
+if [ -f "$MONITOR_COMPOSE_FILE" ]; then
+    COMPOSE_FILE_ARGS+=(-f "$MONITOR_COMPOSE_FILE")
+fi
+
+if [ "${#COMPOSE_FILE_ARGS[@]}" -eq 0 ]; then
+    log_error "Compose 파일을 찾을 수 없습니다."
+    exit 1
+fi
+
+compose_down() {
+    if command -v docker-compose &> /dev/null; then
+        docker-compose "${COMPOSE_FILE_ARGS[@]}" down "$@"
+    else
+        docker compose "${COMPOSE_FILE_ARGS[@]}" down "$@"
+    fi
+}
+
 # =============================================================================
 # 컨테이너 삭제
 # =============================================================================
@@ -108,11 +132,7 @@ else
 
     # 컨테이너 중지
     log_info "컨테이너 중지 중..."
-    if command -v docker-compose &> /dev/null; then
-        docker-compose down
-    else
-        docker compose down
-    fi
+    compose_down
 
     log_success "컨테이너 중지 완료"
 fi
@@ -123,12 +143,7 @@ fi
 
 if [ "$REMOVE_VOLUMES" = true ]; then
     log_info "볼륨 삭제 중..."
-
-    if command -v docker-compose &> /dev/null; then
-        docker-compose down -v
-    else
-        docker compose down -v
-    fi
+    compose_down -v
 
     log_success "볼륨 삭제 완료"
 else
