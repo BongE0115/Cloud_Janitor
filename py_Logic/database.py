@@ -273,6 +273,11 @@ def add_or_update_zombie(tc_name, container_name, short_id, reason, cpu_m, mem_m
     cursor = conn.cursor(dictionary=True)
     try:
         ensure_lifecycle_table(conn)
+        # Delete any existing CANDIDATE record for this container to ensure mutual exclusivity
+        cursor.execute(
+            "DELETE FROM zombie_lifecycle WHERE tc_name = %s AND container_name = %s AND status = 'CANDIDATE'",
+            (tc_name, container_name)
+        )
 
         # If latest record is STOPPED, keep manual stop override (do not recreate PENDING).
         cursor.execute(
@@ -591,31 +596,32 @@ def list_pending_zombies(tc_name=None):
     conn = _get_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        where_clause = "status IN ('PENDING', 'CANDIDATE')"
+        
         if tc_name:
             cursor.execute(
-                """
+                f"""
                 SELECT id, tc_name, container_name, short_id, status,
                        detected_at, scheduled_delete_at, reason,
                        cpu_m, mem_mi, net_b, wasted_cost
                 FROM zombie_lifecycle
-                WHERE status = 'PENDING' AND tc_name = %s
-                ORDER BY scheduled_delete_at ASC
+                WHERE {where_clause} AND tc_name = %s
+                ORDER BY status ASC, scheduled_delete_at ASC
                 """,
                 (tc_name,),
             )
         else:
             cursor.execute(
-                """
+                f"""
                 SELECT id, tc_name, container_name, short_id, status,
                        detected_at, scheduled_delete_at, reason,
                        cpu_m, mem_mi, net_b, wasted_cost
                 FROM zombie_lifecycle
-                WHERE status = 'PENDING'
-                ORDER BY scheduled_delete_at ASC
+                WHERE {where_clause}
+                ORDER BY status ASC, scheduled_delete_at ASC
                 """
             )
         rows = cursor.fetchall()
-        # Normalize datetime fields
         for row in rows:
             row["detected_at"] = _normalize_db_datetime(row.get("detected_at"))
             row["scheduled_delete_at"] = _normalize_db_datetime(row.get("scheduled_delete_at"))
@@ -906,3 +912,70 @@ def remove_from_whitelist(tc_name, container_name):
         return update_target_labels(tc_name, labels), "removed"
     
     return True, "not in whitelist"
+
+
+def mark_as_candidate(config, tc_name, container_name, short_id, reason, cpu_m, mem_mi, net_b):
+    """
+    Insert or update a CANDIDATE record.
+    Ensures mutual exclusivity: Deletes any existing 'PENDING' record for this container.
+    """
+    conn = _get_connection(config)
+    cursor = conn.cursor()
+    try:
+        ensure_lifecycle_table(conn)
+        
+        cursor.execute(
+            "DELETE FROM zombie_lifecycle WHERE tc_name = %s AND container_name = %s AND status = 'PENDING'",
+            (tc_name, container_name)
+        )
+
+        cursor.execute(
+            "SELECT id FROM zombie_lifecycle WHERE tc_name = %s AND container_name = %s AND status = 'CANDIDATE'",
+            (tc_name, container_name)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            cursor.execute(
+                """
+                UPDATE zombie_lifecycle
+                   SET cpu_m = %s, mem_mi = %s, net_b = %s, reason = %s, short_id = %s, updated_at = UTC_TIMESTAMP()
+                 WHERE id = %s
+                """,
+                (float(cpu_m), float(mem_mi), float(net_b), str(reason), short_id, existing[0])
+            )
+        else:
+            cursor.execute(
+                """
+                INSERT INTO zombie_lifecycle (
+                    tc_name, container_name, short_id, status, detected_at, reason, cpu_m, mem_mi, net_b
+                )
+                VALUES (%s, %s, %s, 'CANDIDATE', UTC_TIMESTAMP(), %s, %s, %s, %s)
+                """,
+                (tc_name, container_name, short_id, str(reason), float(cpu_m), float(mem_mi), float(net_b))
+            )
+        conn.commit()
+    except Exception as e:
+        print(f"❌ candidate mark failed: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+        
+def clear_candidate_status(config, tc_name, container_name):
+    """
+    Remove CANDIDATE status if the container has recovered (Active).
+    """
+    conn = _get_connection(config)
+    cursor = conn.cursor()
+    try:
+        ensure_lifecycle_table(conn)
+        cursor.execute(
+            "DELETE FROM zombie_lifecycle WHERE tc_name = %s AND container_name = %s AND status = 'CANDIDATE'",
+            (tc_name, container_name)
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"❌ candidate clear failed: {e}")
+    finally:
+        cursor.close()
+        conn.close()

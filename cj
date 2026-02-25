@@ -66,7 +66,12 @@ log_step() {
 # =============================================================================
 
 # CJ_HOME 환경변수가 설정되어 있으면 사용, 아니면 스크립트 위치 사용
-CJ_HOME="${CJ_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# 심볼릭 링크인 경우 실제 경로 찾기
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_PATH="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || readlink "$SCRIPT_PATH")"
+done
+CJ_HOME="${CJ_HOME:-$(cd "$(dirname "$SCRIPT_PATH")" && pwd)}"
 
 # 경로 설정
 TERRAFORM_DIR="$CJ_HOME/terraform"
@@ -152,12 +157,53 @@ check_env_file() {
     return 0
 }
 
+load_cj_env() {
+    local env_file="$CJ_HOME/.env"
+    [ -f "$env_file" ] || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+
+        case "$line" in
+            ''|'#'*)
+                continue
+                ;;
+        esac
+
+        if [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+
+        line="${line#export }"
+        if [[ "$line" != *=* ]]; then
+            continue
+        fi
+
+        local key="${line%%=*}"
+        local value="${line#*=}"
+
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+
+        if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            continue
+        fi
+
+        if [[ "$value" =~ ^\".*\"$ && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "$value" =~ ^\'.*\'$ && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+
+        printf -v "$key" '%s' "$value"
+        export "$key"
+    done < "$env_file"
+}
+
 # SSH 터널 설정
 setup_ssh_tunnel() {
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
+    load_cj_env
 
     # CLI 옵션이 있으면 우선 사용, 없으면 .env/기본값 사용
     USE_SSH_TUNNEL="${CLI_USE_SSH_TUNNEL:-${USE_SSH_TUNNEL:-true}}"
@@ -222,10 +268,7 @@ setup_ssh_tunnel() {
 
 # SSH 터널 해제
 teardown_ssh_tunnel() {
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
+    load_cj_env
 
     TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
     PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
@@ -557,6 +600,179 @@ cmd_init() {
 }
 
 # =============================================================================
+# 필수 도구 설치 함수
+# =============================================================================
+
+install_terraform() {
+    if command -v terraform &> /dev/null; then
+        log_success "Terraform 이미 설치됨: $(terraform version | head -1)"
+        return 0
+    fi
+
+    log_info "Terraform 설치 중..."
+    
+    local tf_version="1.14.5"
+    local arch="amd64"
+    if [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
+        arch="arm64"
+    fi
+    
+    cd /tmp
+    curl -Lo terraform.zip "https://releases.hashicorp.com/terraform/${tf_version}/terraform_${tf_version}_linux_${arch}.zip"
+    unzip -o terraform.zip
+    sudo mv terraform /usr/local/bin/
+    rm -f terraform.zip
+    cd "$CJ_HOME"
+    
+    if command -v terraform &> /dev/null; then
+        log_success "Terraform 설치 완료: $(terraform version | head -1)"
+    else
+        log_error "Terraform 설치 실패"
+        return 1
+    fi
+}
+
+install_kubectl() {
+    if command -v kubectl &> /dev/null; then
+        log_success "kubectl 이미 설치됨: $(kubectl version --client --short 2>/dev/null || kubectl version --client 2>/dev/null | head -1)"
+        return 0
+    fi
+
+    log_info "kubectl 설치 중..."
+    
+    local kubectl_version="1.35.1"
+    curl -Lo /tmp/kubectl "https://dl.k8s.io/release/v${kubectl_version}/bin/linux/amd64/kubectl"
+    chmod +x /tmp/kubectl
+    sudo mv /tmp/kubectl /usr/local/bin/kubectl
+    
+    if command -v kubectl &> /dev/null; then
+        log_success "kubectl 설치 완료"
+    else
+        log_error "kubectl 설치 실패"
+        return 1
+    fi
+}
+
+install_kind() {
+    if command -v kind &> /dev/null; then
+        log_success "kind 이미 설치됨: $(kind version)"
+        return 0
+    fi
+
+    log_info "kind 설치 중..."
+    
+    local kind_version="0.24.0"
+    curl -Lo /tmp/kind "https://kind.sigs.k8s.io/dl/v${kind_version}/kind-linux-amd64"
+    chmod +x /tmp/kind
+    sudo mv /tmp/kind /usr/local/bin/kind
+    
+    if command -v kind &> /dev/null; then
+        log_success "kind 설치 완료: $(kind version)"
+    else
+        log_error "kind 설치 실패"
+        return 1
+    fi
+}
+
+install_uv() {
+    if command -v uv &> /dev/null; then
+        log_success "uv 이미 설치됨: $(uv --version)"
+        return 0
+    fi
+
+    log_info "uv 설치 중..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    
+    # uv가 설치된 경로를 PATH에 추가
+    export PATH="$HOME/.local/bin:$PATH"
+    
+    if command -v uv &> /dev/null; then
+        log_success "uv 설치 완료: $(uv --version)"
+    else
+        log_error "uv 설치 실패"
+        return 1
+    fi
+}
+
+install_dependencies() {
+    log_step "📦 필수 의존성 설치"
+    echo ""
+    
+    local missing_deps=()
+    local all_installed=true
+    
+    # Docker 확인 (필수)
+    if ! command -v docker &> /dev/null; then
+        log_error "Docker가 설치되어 있지 않습니다."
+        log_info "Docker는 수동으로 설치해야 합니다: https://docs.docker.com/engine/install/"
+        all_installed=false
+    else
+        log_success "Docker ✓"
+    fi
+    
+    # Terraform
+    if ! command -v terraform &> /dev/null; then
+        missing_deps+=("terraform")
+    fi
+    
+    # kubectl
+    if ! command -v kubectl &> /dev/null; then
+        missing_deps+=("kubectl")
+    fi
+    
+    # kind
+    if ! command -v kind &> /dev/null; then
+        missing_deps+=("kind")
+    fi
+    
+    # uv
+    if ! command -v uv &> /dev/null; then
+        missing_deps+=("uv")
+    fi
+    
+    if [ ${#missing_deps[@]} -eq 0 ]; then
+        log_success "모든 필수 도구가 이미 설치되어 있습니다."
+        echo ""
+        log_info "설치된 도구:"
+        command -v terraform &> /dev/null && echo "  - Terraform: $(terraform version | head -1)"
+        command -v kubectl &> /dev/null && echo "  - kubectl: $(kubectl version --client --short 2>/dev/null || echo 'installed')"
+        command -v kind &> /dev/null && echo "  - kind: $(kind version)"
+        command -v uv &> /dev/null && echo "  - uv: $(uv --version)"
+        return 0
+    fi
+    
+    log_info "설치 필요한 도구: ${missing_deps[*]}"
+    echo ""
+    
+    # 누락된 의존성 설치
+    for dep in "${missing_deps[@]}"; do
+        case "$dep" in
+            terraform)
+                install_terraform || all_installed=false
+                ;;
+            kubectl)
+                install_kubectl || all_installed=false
+                ;;
+            kind)
+                install_kind || all_installed=false
+                ;;
+            uv)
+                install_uv || all_installed=false
+                ;;
+        esac
+    done
+    
+    echo ""
+    if [ "$all_installed" = true ]; then
+        log_success "모든 필수 도구 설치 완료"
+    else
+        log_warning "일부 도구 설치 실패. 수동으로 설치해주세요."
+    fi
+    
+    return 0
+}
+
+# =============================================================================
 # cj CLI 설치
 # =============================================================================
 
@@ -582,6 +798,10 @@ cmd_install() {
     echo "=========================================="
     echo "  Cloud Janitor CLI 도구 설치"
     echo "=========================================="
+    echo ""
+
+    # 0) 필수 의존성 설치
+    install_dependencies
     echo ""
 
     # 로그인 쉘 기준으로 RC 파일 선택
@@ -1205,7 +1425,7 @@ cmd_grafana() {
     
     # .env 파일 로드
     if [ -f "$CJ_HOME/.env" ]; then
-        source "$CJ_HOME/.env"
+        load_cj_env
         log_info "ID: admin, Password: ${GRAFANA_PASSWORD:-changeme}"
     else
         log_info "ID: admin, Password: changeme (.env 파일에서 GRAFANA_PASSWORD 설정)"
@@ -1351,10 +1571,7 @@ main() {
                     teardown_ssh_tunnel
                     ;;
                 status)
-                    if [ -f "$CJ_HOME/.env" ]; then
-                        # shellcheck disable=SC1090
-                        source "$CJ_HOME/.env"
-                    fi
+                    load_cj_env
                     TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
                     PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
                     LOCAL_PROMETHEUS_PORT="${CLI_LOCAL_PORT:-${LOCAL_PROMETHEUS_PORT:-9091}}"

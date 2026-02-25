@@ -19,4 +19,5 @@ dependencies = [
     "mysql-connector-python>=9.0.0",
     "python-dotenv>=1.0.0",
     "requests>=2.32.0",
+    "docker>=7.1.0",
 ]

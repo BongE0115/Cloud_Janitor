@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import argparse
+import threading
 import requests
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -156,24 +157,41 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
     
     if not prometheus_url:
         print("[ERROR] No prometheus_url provided")
-        return False
+        return None
     
     # Parse Prometheus URL
     parsed = urlparse(prometheus_url)
     hostname = parsed.hostname or "localhost"
     port = parsed.port or 9091
+    labels = tc_info.get("labels") or {}
+    endpoint_hint = labels.get("prometheus_endpoint", {}) if isinstance(labels, dict) else {}
+    endpoint_hint_ip = str(endpoint_hint.get("ip", "")).strip() if isinstance(endpoint_hint, dict) else ""
+    endpoint_hint_port = endpoint_hint.get("port") if isinstance(endpoint_hint, dict) else None
+    endpoint_source = str(endpoint_hint.get("source", "")).strip() if isinstance(endpoint_hint, dict) else ""
+
+    endpoint_port = int(port)
+    if endpoint_hint_port is not None:
+        try:
+            parsed_port = int(endpoint_hint_port)
+            if 1 <= parsed_port <= 65535:
+                endpoint_port = parsed_port
+        except Exception:
+            pass
     
     # Resolve endpoint IP with one deterministic strategy:
-    # 1) URL host (localhost -> kind host gateway, IP -> itself, hostname -> DNS resolve)
-    # 2) tc_ip from registration payload
-    # 3) kind host gateway fallback
+    # 1) explicit endpoint hint
+    # 2) URL host (localhost -> kind host gateway, IP -> itself, hostname -> DNS resolve)
+    # 3) tc_ip from registration payload
+    # 4) kind host gateway fallback
     # Then pick the first TCP-reachable candidate from cj runtime.
     ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
     is_ip = bool(re.match(ip_pattern, hostname))
     is_local = hostname in ("localhost", "127.0.0.1", "0.0.0.0")
 
     candidates = []
-    if is_local:
+    if endpoint_hint_ip:
+        candidates.append(endpoint_hint_ip)
+    elif is_local:
         kind_ip = get_host_ip_for_kind()
         if kind_ip:
             candidates.append(kind_ip)
@@ -185,7 +203,7 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
             if resolved_ip:
                 candidates.append(resolved_ip)
         except Exception:
-            pass
+            candidates.append(hostname)
 
     if tc_ip and tc_ip != "unknown":
         candidates.append(tc_ip)
@@ -205,7 +223,7 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
 
     endpoint_ip = None
     for candidate in dedup_candidates:
-        if is_tcp_reachable(candidate, port, timeout=2.0):
+        if is_tcp_reachable(candidate, endpoint_port, timeout=2.0):
             endpoint_ip = candidate
             break
 
@@ -214,9 +232,10 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
             f"[ERROR] No reachable TC Prometheus endpoint for {prometheus_url} "
             f"(candidates: {', '.join(dedup_candidates) if dedup_candidates else '<none>'})"
         )
-        return False
+        return None
 
-    print(f"[INFO] Using endpoint IP: {endpoint_ip}:{port} for TC Prometheus")
+    source_msg = f" (source={endpoint_source})" if endpoint_source else ""
+    print(f"[INFO] Using endpoint IP: {endpoint_ip}:{endpoint_port} for TC Prometheus{source_msg}")
     
     # Check if service exists
     try:
@@ -253,7 +272,7 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
                 ports=[
                     client.CoreV1EndpointPort(
                         name="http",
-                        port=port,
+                        port=endpoint_port,
                         protocol="TCP"
                     )
                 ]
@@ -276,8 +295,8 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
             ports=[
                 client.V1ServicePort(
                     name="http",
-                    port=port,
-                    target_port=port,
+                    port=endpoint_port,
+                    target_port=endpoint_port,
                     protocol="TCP"
                 )
             ]
@@ -289,18 +308,22 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
         v1.create_namespaced_endpoints(namespace=namespace, body=endpoints_body)
         # Then create service
         v1.create_namespaced_service(namespace=namespace, body=service_body)
-        print(f"[INFO] Created service: {service_name}.{namespace} -> {endpoint_ip}:{port}")
-        return True
+        print(f"[INFO] Created service: {service_name}.{namespace} -> {endpoint_ip}:{endpoint_port}")
+        return endpoint_port
     except Exception as e:
         print(f"[ERROR] Failed to create service: {e}")
-        return False
+        return None
 
 
 def get_internal_prometheus_url(namespace, port=9091):
-    """Get K8s-internal Prometheus URL for a TC namespace."""
-    service_name = "prometheus"
-    # K8s DNS: service.namespace.svc.cluster.local
-    return f"http://{service_name}.{namespace}.svc.cluster.local:{port}"
+    """Get in-cluster Prometheus URL through TC namespace service."""
+    try:
+        svc_port = int(port)
+    except Exception:
+        svc_port = 9091
+    if svc_port <= 0:
+        svc_port = 9091
+    return f"http://prometheus.{namespace}.svc.cluster.local:{svc_port}"
 
 
 def get_prometheus_port_from_url(prometheus_url, default_port=9091):
@@ -321,6 +344,7 @@ def build_config():
         "TIME_WINDOW_CPU": os.getenv('TIME_WINDOW_CPU', '2m'),
         "LIMIT_NET_B": float(os.getenv('LIMIT_NET_B', 100.0)),
         "TIME_WINDOW_NET": os.getenv('TIME_WINDOW_NET', '2m'),
+        "NET_AVG_WINDOW": os.getenv('NET_AVG_WINDOW', '5m'),
         "LIMIT_MEM_MI": float(os.getenv('LIMIT_MEM_MI', 1.0)),
         "GRACE_PERIOD_MINUTES": int(os.getenv('GRACE_PERIOD_MINUTES', 10)),
         "COST_PER_CORE_HOUR": float(os.getenv('COST_PER_CORE_HOUR', 0.1)),
@@ -348,11 +372,24 @@ def build_config():
     try:
         latest = get_latest_registered_target()
         if latest and latest.get("namespace"):
-            # Prefer stored internal URL from registration snapshot.
-            internal_url = latest.get("internal_prometheus_url")
-            if not internal_url:
-                prom_port = get_prometheus_port_from_url(latest.get("prometheus_url", ""), 9091)
-                internal_url = get_internal_prometheus_url(latest["namespace"], prom_port)
+            # Always normalize to namespace service DNS so old/stale URLs self-heal.
+            prom_port = get_prometheus_port_from_url(latest.get("prometheus_url", ""), 9091)
+            labels = latest.get("labels") or {}
+            endpoint = labels.get("prometheus_endpoint", {}) if isinstance(labels, dict) else {}
+            try:
+                if isinstance(endpoint, dict) and endpoint.get("port"):
+                    prom_port = int(endpoint.get("port"))
+            except Exception:
+                pass
+            stored_internal = latest.get("internal_prometheus_url", "")
+            if stored_internal:
+                try:
+                    parsed_internal = urlparse(stored_internal)
+                    if parsed_internal.port:
+                        prom_port = int(parsed_internal.port)
+                except Exception:
+                    pass
+            internal_url = get_internal_prometheus_url(latest["namespace"], prom_port)
             config["PROMETHEUS_URL"] = internal_url
             config["TARGET_NAME"] = latest.get("tc_name", "tc-target")
             config["SCAN_ENABLED"] = True
@@ -390,6 +427,21 @@ def run_scan():
         return
     bootstrap_runtime_schema(config)
     run_janitor(config)
+
+
+def trigger_post_register_scan(tc_name):
+    """Run one scan asynchronously right after TC registration."""
+    name = str(tc_name or "unknown")
+
+    def _job():
+        try:
+            print(f"[INFO] Triggering post-register scan for TC: {name}")
+            run_scan()
+        except Exception as e:
+            print(f"[WARN] post-register scan failed for {name}: {e}")
+
+    worker = threading.Thread(target=_job, daemon=True, name=f"register-scan-{name}")
+    worker.start()
 
 
 def run_cleanup_cycle():
@@ -554,13 +606,13 @@ def register_tc(tc_info):
         return {"error": "Failed to create namespace"}, 500
     
     # Create Prometheus service
-    if not create_tc_prometheus_service(v1, namespace, tc_info):
+    service_port = create_tc_prometheus_service(v1, namespace, tc_info)
+    if not service_port:
         return {"error": "Failed to create Prometheus service"}, 500
     
     # Add namespace to tc_info for DB storage
     tc_info["namespace"] = namespace
-    prom_port = get_prometheus_port_from_url(tc_info.get("prometheus_url", ""), 9091)
-    tc_info["internal_prometheus_url"] = get_internal_prometheus_url(namespace, prom_port)
+    tc_info["internal_prometheus_url"] = get_internal_prometheus_url(namespace, service_port)
     
     # Save to database
     upsert_registered_target(tc_info)
@@ -568,6 +620,7 @@ def register_tc(tc_info):
     # Create Grafana datasource with internal URL
     upsert_grafana_datasource(tc_info["internal_prometheus_url"], tc_name)
     upsert_grafana_main_prometheus(tc_info["internal_prometheus_url"])
+    trigger_post_register_scan(tc_name)
     
     return {
         "message": "registered",
@@ -916,7 +969,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     <th>Container</th>
                     <th>CPU (m)</th>
                     <th>MEM (Mi)</th>
-                    <th>NET (B)</th>
+                    <th>NET (B/s)</th>
                     <th>상태</th>
                     <th>액션</th>
                 </tr>
