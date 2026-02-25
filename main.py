@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import argparse
+import threading
 import requests
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -392,6 +393,21 @@ def run_scan():
     run_janitor(config)
 
 
+def trigger_post_register_scan(tc_name):
+    """Run one scan asynchronously right after TC registration."""
+    name = str(tc_name or "unknown")
+
+    def _job():
+        try:
+            print(f"[INFO] Triggering post-register scan for TC: {name}")
+            run_scan()
+        except Exception as e:
+            print(f"[WARN] post-register scan failed for {name}: {e}")
+
+    worker = threading.Thread(target=_job, daemon=True, name=f"register-scan-{name}")
+    worker.start()
+
+
 def run_cleanup_cycle():
     """Run deferred cleanup cycle."""
     bootstrap_runtime_schema()
@@ -568,6 +584,7 @@ def register_tc(tc_info):
     # Create Grafana datasource with internal URL
     upsert_grafana_datasource(tc_info["internal_prometheus_url"], tc_name)
     upsert_grafana_main_prometheus(tc_info["internal_prometheus_url"])
+    trigger_post_register_scan(tc_name)
     
     return {
         "message": "registered",
