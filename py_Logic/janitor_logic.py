@@ -2,7 +2,12 @@ import logging
 import shutil
 import subprocess
 import time
-from .metrics import get_prom_val, get_docker_containers_fallback
+from .metrics import (
+    get_prom_val,
+    get_docker_containers_fallback,
+    get_docker_containers_from_docker_stats,
+    get_prometheus_network_avg_rates,
+)
 from .database import (
     add_or_update_zombie,
     get_stopped_overrides,
@@ -16,12 +21,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("SuperJanitor")
 
 
-def get_runtime_state_map(config, container_map):
+def _normalize_container_name(name):
+    text = str(name or "").strip().lower()
+    if text.startswith("/"):
+        text = text[1:]
+    return text
+
+
+def get_runtime_state_map(config, container_map, extra_short_ids=None):
     """
     Return runtime state for tracked short IDs.
     Priority: Docker SDK -> docker CLI fallback.
     """
     short_ids = [str(sid).strip() for sid in (container_map or {}).keys() if str(sid).strip()]
+    if extra_short_ids:
+        for sid in extra_short_ids:
+            value = str(sid).strip()
+            if value and value not in short_ids:
+                short_ids.append(value)
     if not short_ids:
         return {}
 
@@ -117,33 +134,71 @@ def run_janitor(config):
         logger.warning("SCAN_SKIPPED cycle=%s tc=%s reason=%s", cycle_id, _q(tc_name), _q("empty container_map"))
         return
     
-    # Get Docker containers from TC Prometheus (cAdvisor metrics)
+    # Get Docker containers directly from Docker Stats API
+    # This is more reliable and works on WSL/Ubuntu/macOS equally
     try:
-        containers = get_docker_containers_fallback(prom_url)
+        containers = get_docker_containers_from_docker_stats()
         if not containers:
-            logger.warning("⚠️ No containers found from Prometheus")
-            containers = []
+            logger.warning("⚠️ No containers found from Docker Stats, trying Prometheus fallback")
+            containers = get_docker_containers_fallback(prom_url)
     except Exception as e:
-        logger.error(f"❌ Error getting containers from Prometheus: {e}")
-        containers = []
+        logger.error(f"❌ Error getting containers from Docker Stats: {e}")
+        try:
+            containers = get_docker_containers_fallback(prom_url)
+        except Exception as e2:
+            logger.error(f"❌ Prometheus fallback also failed: {e2}")
+            containers = []
+
+    net_avg_window = str(
+        config.get("NET_AVG_WINDOW", config.get("TIME_WINDOW_NET", "5m")) or "5m"
+    ).strip() or "5m"
+    prom_net_rates = {}
+    try:
+        prom_net_rates = get_prometheus_network_avg_rates(prom_url, net_avg_window)
+    except Exception as e:
+        logger.warning("PROM_NET_AVG_FAILED tc=%s error=%s", _q(tc_name), _q(str(e)))
 
     # TC-reported container_map is the source of truth for "which containers exist".
     # cAdvisor metrics are used as supplemental values.
     metrics_by_id = {}
+    metrics_by_name = {}
     for item in containers:
         sid = item.get("short_id")
         if sid:
             metrics_by_id[sid] = item
+            if sid in prom_net_rates:
+                item["net"] = float(prom_net_rates.get(sid, 0.0))
+        name_key = _normalize_container_name(item.get("name"))
+        if name_key and name_key not in metrics_by_name:
+            metrics_by_name[name_key] = item
+
+    aliases_by_name = {}
+    for sid, meta in container_map.items():
+        if not isinstance(meta, dict):
+            continue
+        name_key = _normalize_container_name(meta.get("name"))
+        if name_key and name_key not in aliases_by_name:
+            aliases_by_name[name_key] = (sid, meta)
 
     merged_containers = []
     for sid, meta in container_map.items():
-        metric = metrics_by_id.get(sid, {})
+        metric = metrics_by_id.get(sid)
+        if not metric and isinstance(meta, dict):
+            metric = metrics_by_name.get(_normalize_container_name(meta.get("name")))
+        metric = metric or {}
+        resolved_short_id = str(metric.get("short_id") or sid)
+        net_bps = prom_net_rates.get(resolved_short_id)
+        if net_bps is None:
+            net_bps = prom_net_rates.get(sid)
+        if net_bps is None:
+            net_bps = float(metric.get("net", 0.0))
         merged_containers.append({
             "name": metric.get("name") or meta.get("name") or sid,
-            "short_id": sid,
+            "short_id": resolved_short_id,
+            "map_short_id": sid,
             "cpu": float(metric.get("cpu", 0.0)),
             "mem": float(metric.get("mem", 0.0)),
-            "net": float(metric.get("net", 0.0)),
+            "net": float(net_bps),
             "iops_read": float(metric.get("iops_read", 0.0)),
             "iops_write": float(metric.get("iops_write", 0.0)),
             "type": metric.get("type") or meta.get("type") or "unknown",
@@ -154,7 +209,7 @@ def run_janitor(config):
     containers = merged_containers if merged_containers else containers
     
     # Print header for output
-    print(f"\n{'TC/CONTAINER':<38} {'CPU(m)':>10} {'MEM(Mi)':>10} {'NET(B)':>10} {'TYPE':<15} {'DECISION':<30} {'REASON'}")
+    print(f"\n{'TC/CONTAINER':<38} {'CPU(m)':>10} {'MEM(Mi)':>10} {'NET(B/s)':>10} {'TYPE':<15} {'DECISION':<30} {'REASON'}")
     print("-" * 150)
     
     zombie_count = 0
@@ -164,7 +219,8 @@ def run_janitor(config):
     safe_count = 0
     snapshot_rows = []
     zombie_container_names = set()
-    runtime_states = get_runtime_state_map(config, container_map)
+    runtime_metric_ids = [c.get("short_id") for c in containers if c.get("short_id")]
+    runtime_states = get_runtime_state_map(config, container_map, extra_short_ids=runtime_metric_ids)
     stopped_overrides = set()
     try:
         stopped_overrides = get_stopped_overrides(tc_name, config)
@@ -186,6 +242,12 @@ def run_janitor(config):
         type_str = f"{app_type}/{zombie_type}" if zombie_type else app_type
         display_name = f"{tc_name}/{name}"
         alias = container_map.get(short_id, {}) if short_id else {}
+        if not alias:
+            alias = container_map.get(container.get("map_short_id"), {})
+        if not alias:
+            alias_match = aliases_by_name.get(_normalize_container_name(name))
+            if alias_match:
+                alias = alias_match[1]
         alias_name = alias.get('name') if isinstance(alias, dict) else None
         alias_state = str((alias or {}).get("state") or "").lower() if isinstance(alias, dict) else ""
         if alias_name:

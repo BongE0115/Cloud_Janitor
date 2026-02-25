@@ -26,7 +26,12 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-TC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 심볼릭 링크인 경우 실제 경로 찾기
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_PATH="$(readlink -f "$SCRIPT_PATH" 2>/dev/null || readlink "$SCRIPT_PATH")"
+done
+TC_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 TC_SETUP="$TC_DIR/setup.sh"
 TC_TEARDOWN="$TC_DIR/teardown.sh"
 TC_CONNECT="$TC_DIR/setup-connection-to-cj.sh"

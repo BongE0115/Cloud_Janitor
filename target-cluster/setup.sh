@@ -287,6 +287,12 @@ wait_for_container() {
 
 if [ "$MODE" != "apps" ]; then
     wait_for_container "target-prometheus"
+    
+    # Kind 네트워크에 연결 (CJ에서 접근 가능하도록)
+    if docker network inspect kind &>/dev/null; then
+        log_info "Kind 네트워크에 Prometheus 연결 중..."
+        docker network connect kind target-prometheus 2>/dev/null || log_warning "Kind 네트워크 연결 실패 (무시)"
+    fi
     wait_for_container "cadvisor"
 
     log_info "Prometheus 헬스 체크 중..."
