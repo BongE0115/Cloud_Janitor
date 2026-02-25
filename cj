@@ -152,12 +152,53 @@ check_env_file() {
     return 0
 }
 
+load_cj_env() {
+    local env_file="$CJ_HOME/.env"
+    [ -f "$env_file" ] || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+
+        case "$line" in
+            ''|'#'*)
+                continue
+                ;;
+        esac
+
+        if [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+
+        line="${line#export }"
+        if [[ "$line" != *=* ]]; then
+            continue
+        fi
+
+        local key="${line%%=*}"
+        local value="${line#*=}"
+
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+
+        if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            continue
+        fi
+
+        if [[ "$value" =~ ^\".*\"$ && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "$value" =~ ^\'.*\'$ && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+
+        printf -v "$key" '%s' "$value"
+        export "$key"
+    done < "$env_file"
+}
+
 # SSH 터널 설정
 setup_ssh_tunnel() {
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
+    load_cj_env
 
     # CLI 옵션이 있으면 우선 사용, 없으면 .env/기본값 사용
     USE_SSH_TUNNEL="${CLI_USE_SSH_TUNNEL:-${USE_SSH_TUNNEL:-true}}"
@@ -222,10 +263,7 @@ setup_ssh_tunnel() {
 
 # SSH 터널 해제
 teardown_ssh_tunnel() {
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
+    load_cj_env
 
     TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
     PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
@@ -1205,7 +1243,7 @@ cmd_grafana() {
     
     # .env 파일 로드
     if [ -f "$CJ_HOME/.env" ]; then
-        source "$CJ_HOME/.env"
+        load_cj_env
         log_info "ID: admin, Password: ${GRAFANA_PASSWORD:-changeme}"
     else
         log_info "ID: admin, Password: changeme (.env 파일에서 GRAFANA_PASSWORD 설정)"
@@ -1351,10 +1389,7 @@ main() {
                     teardown_ssh_tunnel
                     ;;
                 status)
-                    if [ -f "$CJ_HOME/.env" ]; then
-                        # shellcheck disable=SC1090
-                        source "$CJ_HOME/.env"
-                    fi
+                    load_cj_env
                     TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
                     PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
                     LOCAL_PROMETHEUS_PORT="${CLI_LOCAL_PORT:-${LOCAL_PROMETHEUS_PORT:-9091}}"
