@@ -117,19 +117,14 @@
     },
     {
       "type": "timeseries",
-      "title": "네트워크 트래픽 (TC 전체)",
+      "title": "네트워크 사용량 (컨테이너별, RX+TX)",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
-      "datasource": { "type": "prometheus", "uid": "prometheus-main" },
+      "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
-          "expr": "sum by (interface) (irate(container_network_receive_bytes_total{interface!=\"lo\"}[5m]))",
-          "legendFormat": "{{interface}} IN",
+          "expr": "max by (tc_container) (last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\"} |= \"SCAN_CONTAINER\" | logfmt | unwrap net_b [5m]))",
+          "legendFormat": "{{tc_container}}",
           "refId": "A"
-        },
-        {
-          "expr": "sum by (interface) (irate(container_network_transmit_bytes_total{interface!=\"lo\"}[5m]))",
-          "legendFormat": "{{interface}} OUT",
-          "refId": "B"
         }
       ],
       "fieldConfig": { "defaults": { "unit": "binbps" } }
