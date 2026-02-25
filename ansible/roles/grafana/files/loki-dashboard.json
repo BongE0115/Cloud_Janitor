@@ -25,7 +25,7 @@
     {
       "type": "stat",
       "title": "현재 좀비 수",
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -41,7 +41,7 @@
     {
       "type": "stat",
       "title": "현재 후보 수",
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -56,8 +56,24 @@
     },
     {
       "type": "stat",
-      "title": "현재 절감 추정 비용",
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "title": "누적 좀비 수 (정지/삭제)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "mysql", "uid": "mysql-main" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT COUNT(*) AS value FROM zombie_lifecycle WHERE status IN ('STOPPED','DELETED');"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "비용 절감 추정 비용",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -76,7 +92,7 @@
     {
       "type": "timeseries",
       "title": "감지 추이 (Zombie / Candidate / Active)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "timeFrom": "1h",
       "interval": "1m",
@@ -118,7 +134,7 @@
     {
       "type": "timeseries",
       "title": "네트워크 사용량 (컨테이너별, RX+TX)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
@@ -132,7 +148,7 @@
     {
       "type": "table",
       "title": "현재 감지 컨테이너 상태 (Latest Scan)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -146,9 +162,7 @@
         "overrides": [
           {
             "matcher": { "id": "byName", "options": "net_b" },
-            "properties": [
-              { "id": "unit", "value": "Bps" }
-            ]
+            "properties": [{ "id": "unit", "value": "Bps" }]
           }
         ]
       },
@@ -165,7 +179,7 @@
     {
       "type": "logs",
       "title": "Janitor API 로그 (cloud-janitor)",
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 32 },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 38 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
@@ -182,7 +196,7 @@
     {
       "type": "logs",
       "title": "Janitor Scanner 로그 (cloud-janitor-scanner)",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 32 },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 38 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
