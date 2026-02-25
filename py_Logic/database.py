@@ -667,6 +667,9 @@ def stop_zombie(zombie_id, config=None):
             """
             UPDATE zombie_lifecycle
                SET status = 'STOPPED',
+                   stopped_at = COALESCE(stopped_at, UTC_TIMESTAMP()),
+                   last_cost_calc_at = COALESCE(last_cost_calc_at, UTC_TIMESTAMP()),
+                   stop_ended_at = NULL,
                    updated_at = UTC_TIMESTAMP(),
                    last_error = NULL
              WHERE id = %s AND status = 'PENDING'
@@ -682,6 +685,42 @@ def stop_zombie(zombie_id, config=None):
                 "status": "STOPPED",
             }
         return {"success": False, "error": "zombie not found or not pending"}
+    finally:
+        cursor.close()
+        conn.close()
+
+def accumulate_wasted_cost(config=None):
+    conn = _get_connection(config)
+    cursor = conn.cursor()
+    try:
+        cpu_rate = float((config or {}).get("CPU_COST_PER_M_PER_SEC", os.getenv("CPU_COST_PER_M_PER_SEC", "0.0")))
+        mem_rate = float((config or {}).get("MEM_COST_PER_MI_PER_SEC", os.getenv("MEM_COST_PER_MI_PER_SEC", "0.0")))
+        net_rate = float((config or {}).get("NET_COST_PER_B_PER_SEC",  os.getenv("NET_COST_PER_B_PER_SEC",  "0.0")))
+
+        cursor.execute(
+            """
+            UPDATE zombie_lifecycle
+            SET
+              wasted_cost = wasted_cost + (
+                GREATEST(
+                  TIMESTAMPDIFF(SECOND, COALESCE(last_cost_calc_at, stopped_at), UTC_TIMESTAMP()),
+                  0
+                )
+                *
+                (
+                  (cpu_m * %s) + (mem_mi * %s) + (net_b * %s)
+                )
+              ),
+              last_cost_calc_at = UTC_TIMESTAMP(),
+              updated_at = UTC_TIMESTAMP()
+            WHERE status='STOPPED'
+              AND stopped_at IS NOT NULL
+              AND last_cost_calc_at IS NOT NULL
+            """,
+            (cpu_rate, mem_rate, net_rate),
+        )
+        conn.commit()
+        return cursor.rowcount
     finally:
         cursor.close()
         conn.close()
