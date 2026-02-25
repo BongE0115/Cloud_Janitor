@@ -289,6 +289,40 @@ if [ -z "$TC_PROM_URL" ]; then
     TC_PROM_URL="$(resolve_default_prom_url)"
 fi
 
+PROM_ENDPOINT_IP=""
+PROM_ENDPOINT_PORT=""
+PROM_ENDPOINT_SOURCE=""
+
+detect_prometheus_endpoint_hint() {
+    local parsed_host=""
+    parsed_host=$(python3 -c '
+from urllib.parse import urlparse
+import sys
+u = urlparse(sys.argv[1] or "")
+print((u.hostname or "").lower())
+' "$TC_PROM_URL" 2>/dev/null || echo "")
+
+    # Prefer target-prometheus IP on the kind network whenever available.
+    # This remains OS-independent because docker network metadata abstracts host OS details.
+    if command -v docker >/dev/null 2>&1; then
+        local kind_ip=""
+        kind_ip=$(docker inspect -f '{{with index .NetworkSettings.Networks "kind"}}{{.IPAddress}}{{end}}' target-prometheus 2>/dev/null | tr -d '\r\n' || true)
+        if [ -n "$kind_ip" ]; then
+            PROM_ENDPOINT_IP="$kind_ip"
+            PROM_ENDPOINT_PORT="9090"
+            PROM_ENDPOINT_SOURCE="kind-network-target-prometheus"
+            return 0
+        fi
+    fi
+
+    # Keep previous behavior note for troubleshooting.
+    if [ "$parsed_host" = "localhost" ] || [ "$parsed_host" = "127.0.0.1" ] || [ "$parsed_host" = "0.0.0.0" ]; then
+        PROM_ENDPOINT_SOURCE="localhost-no-kind-ip"
+    fi
+}
+
+detect_prometheus_endpoint_hint
+
 # =============================================================================
 # 사전 체크
 # =============================================================================
@@ -374,6 +408,9 @@ log_info "  - IP:       $TC_IP"
 log_info "  - OS:       $TC_OS"
 log_info "  - 아키텍처: $TC_ARCH"
 log_info "  - Prometheus: $TC_PROM_URL"
+if [ -n "$PROM_ENDPOINT_IP" ]; then
+    log_info "  - Endpoint 힌트: ${PROM_ENDPOINT_IP}:${PROM_ENDPOINT_PORT} (${PROM_ENDPOINT_SOURCE})"
+fi
 log_info "  - WhiteList(base):   $BASE_WHITELIST"
 log_info "  - WhiteList(custom): ${CUSTOM_WHITELIST:-<none>}"
 log_info "  - WhiteList(send):   $TC_WHITELIST"
@@ -518,10 +555,22 @@ import json, sys
 labels = json.loads(sys.argv[1]) if sys.argv[1] else {}
 container_map = json.loads(sys.argv[2]) if sys.argv[2] else {}
 whitelist = [x.strip() for x in (sys.argv[3] or "").split(",") if x.strip()]
+endpoint_ip = (sys.argv[4] or "").strip()
+endpoint_port = (sys.argv[5] or "").strip()
+endpoint_source = (sys.argv[6] or "").strip()
 labels["container_map"] = container_map
 labels["container_whitelist"] = whitelist
+if endpoint_ip:
+    endpoint = {"ip": endpoint_ip}
+    try:
+        endpoint["port"] = int(endpoint_port) if endpoint_port else 9090
+    except Exception:
+        endpoint["port"] = 9090
+    if endpoint_source:
+        endpoint["source"] = endpoint_source
+    labels["prometheus_endpoint"] = endpoint
 print(json.dumps(labels, ensure_ascii=False))
-' "$LABELS_JSON" "$CONTAINER_MAP_JSON" "$TC_WHITELIST")
+' "$LABELS_JSON" "$CONTAINER_MAP_JSON" "$TC_WHITELIST" "$PROM_ENDPOINT_IP" "$PROM_ENDPOINT_PORT" "$PROM_ENDPOINT_SOURCE")
 
 # JSON 요청 본문 생성
 REQUEST_BODY=$(cat << EOF
