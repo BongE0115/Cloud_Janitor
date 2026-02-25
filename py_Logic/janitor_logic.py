@@ -14,6 +14,8 @@ from .database import (
     mark_recovered_pendings,
     process_cleanup,
     save_latest_scan_snapshot,
+    mark_as_candidate,
+    clear_candidate_status
 )
 
 # 로그 기록 방식 설정
@@ -369,18 +371,24 @@ def run_janitor(config):
         
         # Zombie conditions: CPU <= 1m AND IOPS < threshold
         zombie_cpu_threshold = 1.0  # 1 millicore = almost no CPU usage
-        is_very_low_cpu = cpu_val <= zombie_cpu_threshold
+        candidate_cpu_threshold = 5.0  # 5 millicores or less is suspiciously low
+        is_zombie_level = cpu_val <= zombie_cpu_threshold
+        is_candidate_level = cpu_val <= candidate_cpu_threshold
         is_low_iops = iops_val < limit_iops
         
         # Zombie = very low CPU AND low IOPS (truly idle containers)
-        if is_very_low_cpu and is_low_iops:
+        if is_zombie_level and is_low_iops:
             decision = "🚨 ZOMBIE DETECTED"
             reason = f"cpu<={zombie_cpu_threshold}m(actual:{cpu_val:.1f}m) && iops<{limit_iops}(actual:{iops_val:.2f}/s)"
             zombie_count += 1
+        elif is_candidate_level:
+            decision = "⚠️ CANDIDATE"
+            reason = f"Under Limit: {zombie_cpu_threshold}m < cpu({cpu_val:.2f}m) <= {candidate_cpu_threshold}m"
+            candidate_count += 1
         else:
             decision = "✅ ACTIVE"
             active_metrics = []
-            if not is_very_low_cpu:
+            if not is_zombie_level:
                 active_metrics.append(f"cpu={cpu_val:.1f}m")
             if not is_low_iops:
                 active_metrics.append(f"iops={iops_val:.2f}/s")
@@ -442,6 +450,20 @@ def run_janitor(config):
                     _q(pending_name),
                     _q(short_id or ""),
                 )
+        elif decision == "⚠️ CANDIDATE":
+            pending_name = alias_name or name
+            # Candidate status is for ambiguous cases - it does not trigger pending lifecycle row, but is marked in DB for UI to show "candidate" badge and allow user to review.
+            mark_as_candidate(
+                config, tc_name, pending_name, short_id, 
+                reason, cpu_val, mem_val, net_val
+            )
+            logger.info("LIFECYCLE_CANDIDATE tc=%s container=%s short_id=%s", _q(tc_name), _q(pending_name), _q(short_id or ""))
+
+        # If container is active but was previously pending, clear pending status to avoid stale entries.
+        elif decision == "✅ ACTIVE":
+            pending_name = alias_name or name
+            # Clear candidate status if it exists, since it's no longer ambiguous or pending.
+            clear_candidate_status(config, tc_name, pending_name)
 
     # If a previously pending container is no longer zombie in this scan, cancel deletion.
     if not config['DRY_RUN']:
