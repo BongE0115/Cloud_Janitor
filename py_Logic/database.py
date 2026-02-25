@@ -310,14 +310,22 @@ def add_or_update_zombie(tc_name, container_name, short_id, reason, cpu_m, mem_m
         existing = cursor.fetchone()
 
         if existing:
-            # Update existing PENDING record
-            cursor.execute(
+            cursor.execute( 
                 """
                 UPDATE zombie_lifecycle
-                   SET cpu_m = %s, mem_mi = %s, net_b = %s, reason = %s, short_id = %s, updated_at = UTC_TIMESTAMP()
+                   SET 
+                       wasted_cost = wasted_cost + (
+                           TIMESTAMPDIFF(SECOND, updated_at, UTC_TIMESTAMP()) / 3600 * %s
+                       ),
+                       cpu_m = %s, mem_mi = %s, net_b = %s, reason = %s, short_id = %s, 
+                       updated_at = UTC_TIMESTAMP()
                  WHERE id = %s
                 """,
-                (float(cpu_m), float(mem_mi), float(net_b), str(reason), short_id, int(existing["id"])),
+                (
+                    float(config.get("COST_PER_CORE_HOUR", 0.1)),
+                    float(cpu_m), float(mem_mi), float(net_b), str(reason), short_id, 
+                    int(existing["id"])
+                ),
             )
         else:
             # Create new PENDING record
@@ -715,7 +723,6 @@ def accumulate_wasted_cost(config=None):
               updated_at = UTC_TIMESTAMP()
             WHERE status='STOPPED'
               AND stopped_at IS NOT NULL
-              AND last_cost_calc_at IS NOT NULL
             """,
             (cpu_rate, mem_rate, net_rate),
         )
