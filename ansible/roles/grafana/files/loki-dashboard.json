@@ -119,13 +119,13 @@
       "type": "timeseries",
       "title": "네트워크 사용량 (컨테이너별)",
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
-      "datasource": { "type": "prometheus", "uid": "prometheus-main" },
+      "datasource": { "type": "loki", "uid": "loki-main" },
       "timeFrom": "1h",
       "interval": "1m",
       "targets": [
         {
-          "expr": "sum by (name) (irate(container_network_receive_bytes_total{id=~\".*(/docker/[a-f0-9]{12,64}|docker-[a-f0-9]{12,64}\\\\.scope).*\",interface!=\"lo\",name!=\"\",container_label_com_docker_compose_project=\"target-cluster\"}[5m])) + sum by (name) (irate(container_network_transmit_bytes_total{id=~\".*(/docker/[a-f0-9]{12,64}|docker-[a-f0-9]{12,64}\\\\.scope).*\",interface!=\"lo\",name!=\"\",container_label_com_docker_compose_project=\"target-cluster\"}[5m]))",
-          "legendFormat": "{{name}}",
+          "expr": "max by (tc_container) (last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\", namespace=~\"$namespace\"} |= \"SCAN_CONTAINER\" | logfmt | __error__=\"\" | unwrap net_b [1m]))",
+          "legendFormat": "{{tc_container}}",
           "refId": "A"
         }
       ],
