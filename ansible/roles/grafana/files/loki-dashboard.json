@@ -63,7 +63,7 @@
         {
           "refId": "A",
           "format": "table",
-          "rawSql": "SELECT ROUND(COALESCE(SUM(zombie_count), 0) * 0.5, 2) AS value FROM scan_latest_summary;"
+          "rawSql": "SELECT ROUND(COALESCE(SUM(wasted_cost), 0), 2) AS value FROM zombie_lifecycle WHERE status IN ('STOPPED','DELETED');"
         }
       ],
       "fieldConfig": {
@@ -173,7 +173,11 @@
           "refId": "A"
         }
       ],
-      "options": { "showTime": true, "enableLogDetails": true, "sortOrder": "Ascending" }
+      "options": {
+        "showTime": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending"
+      }
     },
     {
       "type": "logs",
@@ -186,7 +190,11 @@
           "refId": "A"
         }
       ],
-      "options": { "showTime": true, "enableLogDetails": true, "sortOrder": "Ascending" }
+      "options": {
+        "showTime": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending"
+      }
     }
   ]
 }
