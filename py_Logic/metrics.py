@@ -51,6 +51,55 @@ def get_prom_result(url, query):
         return []
 
 
+def _sum_network_bytes_from_stats(stats):
+    """Return RX+TX cumulative bytes from Docker stats payload."""
+    total = 0.0
+    networks = (stats or {}).get("networks") or {}
+    if not isinstance(networks, dict):
+        return total
+    for data in networks.values():
+        if not isinstance(data, dict):
+            continue
+        total += float(data.get("rx_bytes", 0.0) or 0.0)
+        total += float(data.get("tx_bytes", 0.0) or 0.0)
+    return total
+
+
+def _collect_docker_net_rates(tracked_containers, sample_seconds=1.0):
+    """Collect per-container RX+TX bytes/sec from Docker stats."""
+    if not tracked_containers:
+        return {}
+
+    first = {}
+    second = {}
+
+    try:
+        for c in tracked_containers:
+            try:
+                first[c.short_id] = _sum_network_bytes_from_stats(c.stats(stream=False))
+            except Exception:
+                continue
+
+        time.sleep(max(0.1, float(sample_seconds)))
+
+        for c in tracked_containers:
+            try:
+                second[c.short_id] = _sum_network_bytes_from_stats(c.stats(stream=False))
+            except Exception:
+                continue
+    except Exception:
+        return {}
+
+    rates = {}
+    dt = max(0.1, float(sample_seconds))
+    for short_id, start_val in first.items():
+        if short_id not in second:
+            continue
+        delta = float(second[short_id]) - float(start_val)
+        rates[short_id] = max(0.0, delta / dt)
+    return rates
+
+
 def get_docker_containers_from_prometheus(url):
     """
     Get Docker container metrics from Prometheus/cAdvisor.
@@ -61,9 +110,11 @@ def get_docker_containers_from_prometheus(url):
     
     # Get container info from Docker SDK
     container_map = {}
+    tracked_containers = []
+    docker_client = None
     try:
-        client = docker.DockerClient(base_url='unix:///var/run/docker.sock')
-        for container in client.containers.list():
+        docker_client = docker.DockerClient(base_url='unix:///var/run/docker.sock')
+        for container in docker_client.containers.list():
             # Only get containers in tc-network
             networks = container.attrs.get('NetworkSettings', {}).get('Networks', {})
             if 'tc-network' not in networks:
@@ -76,12 +127,18 @@ def get_docker_containers_from_prometheus(url):
                 'type': labels.get('app-type', ''),
                 'zombie_type': labels.get('zombie-type', ''),
             }
+            tracked_containers.append(container)
     except Exception as e:
         print(f"[WARN] Failed to get Docker container list: {e}")
         return []
     
     if not container_map:
         print("[WARN] No containers found in tc-network")
+        try:
+            if docker_client is not None:
+                docker_client.close()
+        except Exception:
+            pass
         return []
     
     containers = {}
@@ -98,6 +155,31 @@ def get_docker_containers_from_prometheus(url):
             'type': info['type'],
             'zombie_type': info['zombie_type'],
         }
+
+    # Preferred: container-level net rate from Docker stats (RX+TX bytes/sec).
+    net_rates = {}
+    try:
+        sample_seconds = float(os.getenv("NET_SAMPLE_SECONDS", "2.0") or 2.0)
+        sample_seconds = max(0.3, min(sample_seconds, 10.0))
+        net_rates = _collect_docker_net_rates(tracked_containers, sample_seconds=sample_seconds)
+    except Exception as e:
+        print(f"[WARN] Docker stats network collection failed: {e}")
+        net_rates = {}
+    finally:
+        try:
+            if docker_client is not None:
+                docker_client.close()
+        except Exception:
+            pass
+
+    if net_rates:
+        for short_id, rate in net_rates.items():
+            info = container_map.get(short_id)
+            if not info:
+                continue
+            name = info['name']
+            if name in containers:
+                containers[name]['net'] = float(rate)
     
     # Query all container CPU metrics from cAdvisor
     cpu_query = 'rate(container_cpu_usage_seconds_total{id=~"/docker/.*"}[2m]) * 1000'
@@ -143,25 +225,27 @@ def get_docker_containers_from_prometheus(url):
         mem_val = float(item.get('value', [0, 0])[1]) / 1024 / 1024
         containers[name]['mem'] += mem_val
     
-    # Query network
-    net_query = 'rate(container_network_receive_bytes_total{id=~"/docker/.*"}[2m])'
-    net_results = get_prom_result(url, net_query)
-    
-    for item in net_results:
-        metric = item.get('metric', {})
-        container_id = metric.get('id', '')
-        
-        if container_id.startswith('/docker/'):
-            short_id = container_id.split('/')[-1][:12]
-        else:
-            continue
-        
-        if short_id not in container_map:
-            continue
-        
-        name = container_map[short_id]['name']
-        net_val = float(item.get('value', [0, 0])[1])
-        containers[name]['net'] += net_val
+    # Fallback: Prometheus network if Docker stats rates are unavailable.
+    if not net_rates:
+        net_rx_query = 'rate(container_network_receive_bytes_total{id=~"/docker/.*"}[2m])'
+        net_tx_query = 'rate(container_network_transmit_bytes_total{id=~"/docker/.*"}[2m])'
+        net_results = get_prom_result(url, net_rx_query) + get_prom_result(url, net_tx_query)
+
+        for item in net_results:
+            metric = item.get('metric', {})
+            container_id = metric.get('id', '')
+
+            if container_id.startswith('/docker/'):
+                short_id = container_id.split('/')[-1][:12]
+            else:
+                continue
+
+            if short_id not in container_map:
+                continue
+
+            name = container_map[short_id]['name']
+            net_val = float(item.get('value', [0, 0])[1])
+            containers[name]['net'] += net_val
     
     return list(containers.values())
 

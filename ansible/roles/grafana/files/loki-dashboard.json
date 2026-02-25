@@ -127,7 +127,7 @@
           "refId": "A"
         }
       ],
-      "fieldConfig": { "defaults": { "unit": "binbps" } }
+      "fieldConfig": { "defaults": { "unit": "Bps" } }
     },
     {
       "type": "table",
@@ -138,15 +138,26 @@
         {
           "refId": "A",
           "format": "table",
-          "rawSql": "SELECT c.tc_name, c.tc_container, ROUND(c.cpu_m, 2) AS cpu_m, ROUND(c.mem_mi, 2) AS mem_mi, ROUND(c.net_b, 2) AS net_b, c.ctype, c.decision, c.reason FROM scan_latest_containers c JOIN scan_latest_summary s ON s.tc_name = c.tc_name AND s.cycle_id = c.cycle_id ORDER BY c.tc_name, c.tc_container;"
+          "rawSql": "SELECT c.tc_name, c.tc_container, ROUND(c.cpu_m, 2) AS cpu_m, ROUND(c.mem_mi, 2) AS mem_mi, ROUND(c.net_b, 2) AS net_b, c.ctype, c.decision, c.reason FROM scan_latest_containers c JOIN scan_latest_summary s ON s.tc_name = c.tc_name AND s.cycle_id = c.cycle_id ORDER BY c.net_b DESC, c.tc_container;"
         }
       ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "net_b" },
+            "properties": [
+              { "id": "unit", "value": "Bps" }
+            ]
+          }
+        ]
+      },
       "options": {
         "showHeader": true,
         "sortBy": [
           {
-            "displayName": "tc_container",
-            "desc": false
+            "displayName": "net_b",
+            "desc": true
           }
         ]
       }
