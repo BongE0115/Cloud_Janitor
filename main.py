@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import argparse
+import threading
 import requests
 import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -117,47 +118,42 @@ def create_tc_namespace(v1, tc_name, tc_info):
 
 
 def get_host_ip_for_kind():
-    """Get host IP that kind cluster can use to reach host services."""
-    import socket
+    """Best-effort host gateway IP reachable from kind."""
+    # Method 1: Resolve host.docker.internal from kind control-plane container.
+    kind_containers = ["cloud-janitor-cluster-control-plane"]
+    for container in kind_containers:
+        try:
+            result = os.popen(f"docker exec {container} getent hosts host.docker.internal 2>/dev/null | awk '{{print $1}}'").read().strip()
+            if result and result != "":
+                return result
+        except Exception:
+            pass
     
-    # Try to get the host's IP that kind can reach
-    # kind clusters use the host's docker bridge network
+    # Method 2: Docker bridge gateway IP on host.
     try:
-        # Method 1: Check for docker bridge IP
-        result = os.popen("ip route show default | awk '/default/ {print $3}'").read().strip()
-        if result and result != "":
+        result = os.popen("docker network inspect bridge 2>/dev/null | grep -m1 '\"Gateway\"' | awk -F'\"' '{print $4}'").read().strip()
+        if result and result != "" and result != "null":
             return result
     except Exception:
         pass
-    
+
+    return ""
+
+
+def is_tcp_reachable(host, port, timeout=2.0):
+    """Check TCP reachability from cj runtime."""
     try:
-        # Method 2: Get IP from hostname
-        hostname = socket.gethostname()
-        host_ip = socket.gethostbyname(hostname)
-        if host_ip and not host_ip.startswith("127."):
-            return host_ip
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
     except Exception:
-        pass
-    
-    try:
-        # Method 3: Get IP from network interface
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        host_ip = s.getsockname()[0]
-        s.close()
-        return host_ip
-    except Exception:
-        pass
-    
-    # Fallback: Use host.docker.internal (works on Docker Desktop)
-    return "host.docker.internal"
+        return False
 
 
 def create_tc_prometheus_service(v1, namespace, tc_info):
     """Create Service pointing to TC Prometheus (external)."""
     service_name = "prometheus"
     prometheus_url = tc_info.get("prometheus_url", "")
-    tc_ip = tc_info.get("tc_ip", "")
+    tc_ip = str(tc_info.get("tc_ip", "")).strip()
     
     if not prometheus_url:
         print("[ERROR] No prometheus_url provided")
@@ -168,25 +164,59 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
     hostname = parsed.hostname or "localhost"
     port = parsed.port or 9091
     
-    # Resolve IP address for Endpoints (K8s Endpoints require IP, not hostname)
-    # If hostname is localhost or 127.0.0.1, use tc_ip or detect host IP
-    if hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
-        # TC is on the same host as cj
-        if tc_ip and tc_ip != "unknown":
-            endpoint_ip = tc_ip
-        else:
-            # Get host IP that kind can reach
-            endpoint_ip = get_host_ip_for_kind()
+    # Resolve endpoint IP with one deterministic strategy:
+    # 1) URL host (localhost -> kind host gateway, IP -> itself, hostname -> DNS resolve)
+    # 2) tc_ip from registration payload
+    # 3) kind host gateway fallback
+    # Then pick the first TCP-reachable candidate from cj runtime.
+    ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    is_ip = bool(re.match(ip_pattern, hostname))
+    is_local = hostname in ("localhost", "127.0.0.1", "0.0.0.0")
+
+    candidates = []
+    if is_local:
+        kind_ip = get_host_ip_for_kind()
+        if kind_ip:
+            candidates.append(kind_ip)
+    elif is_ip:
+        candidates.append(hostname)
     else:
-        # TC is on a remote host - use the IP directly if it's an IP
-        # or try to resolve the hostname
         try:
-            import socket
-            endpoint_ip = socket.gethostbyname(hostname)
+            resolved_ip = socket.gethostbyname(hostname)
+            if resolved_ip:
+                candidates.append(resolved_ip)
         except Exception:
-            # If hostname resolution fails, assume it's already an IP
-            endpoint_ip = hostname
-    
+            pass
+
+    if tc_ip and tc_ip != "unknown":
+        candidates.append(tc_ip)
+
+    kind_ip = get_host_ip_for_kind()
+    if kind_ip:
+        candidates.append(kind_ip)
+
+    dedup_candidates = []
+    seen = set()
+    for candidate in candidates:
+        value = str(candidate).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        dedup_candidates.append(value)
+
+    endpoint_ip = None
+    for candidate in dedup_candidates:
+        if is_tcp_reachable(candidate, port, timeout=2.0):
+            endpoint_ip = candidate
+            break
+
+    if not endpoint_ip:
+        print(
+            f"[ERROR] No reachable TC Prometheus endpoint for {prometheus_url} "
+            f"(candidates: {', '.join(dedup_candidates) if dedup_candidates else '<none>'})"
+        )
+        return False
+
     print(f"[INFO] Using endpoint IP: {endpoint_ip}:{port} for TC Prometheus")
     
     # Check if service exists
@@ -232,7 +262,7 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
         ]
     )
     
-    # Create Service
+    # Create Service (use regular ClusterIP, not headless, for proper DNS resolution)
     service_body = client.V1Service(
         metadata=client.V1ObjectMeta(
             name=service_name,
@@ -244,7 +274,6 @@ def create_tc_prometheus_service(v1, namespace, tc_info):
         ),
         spec=client.V1ServiceSpec(
             type="ClusterIP",
-            cluster_ip="None",  # Headless service for external endpoints
             ports=[
                 client.V1ServicePort(
                     name="http",
@@ -362,6 +391,21 @@ def run_scan():
         return
     bootstrap_runtime_schema(config)
     run_janitor(config)
+
+
+def trigger_post_register_scan(tc_name):
+    """Run one scan asynchronously right after TC registration."""
+    name = str(tc_name or "unknown")
+
+    def _job():
+        try:
+            print(f"[INFO] Triggering post-register scan for TC: {name}")
+            run_scan()
+        except Exception as e:
+            print(f"[WARN] post-register scan failed for {name}: {e}")
+
+    worker = threading.Thread(target=_job, daemon=True, name=f"register-scan-{name}")
+    worker.start()
 
 
 def run_cleanup_cycle():
@@ -540,6 +584,7 @@ def register_tc(tc_info):
     # Create Grafana datasource with internal URL
     upsert_grafana_datasource(tc_info["internal_prometheus_url"], tc_name)
     upsert_grafana_main_prometheus(tc_info["internal_prometheus_url"])
+    trigger_post_register_scan(tc_name)
     
     return {
         "message": "registered",

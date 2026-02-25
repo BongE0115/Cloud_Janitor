@@ -48,7 +48,7 @@ TC(Target Cluster) → cj(Cloud Janitor) 연결 요청 스크립트
 
 OPTIONS:
     -h, --help              이 도움말을 표시
-    -a, --cj-host HOST      cj(Cloud Janitor) 주소 (필수)
+    -a, --cj-host HOST      cj(Cloud Janitor) 주소 (등록 시 필수, --check 단독 시 localhost 기본값)
     -p, --cj-port PORT      cj API 포트 (기본값: CJ_PORT 또는 30800)
     -n, --name NAME         TC 이름 (기본값: tc-target)
     --prom-url URL          TC Prometheus URL (미지정 시 실행 중인 compose 기준 자동 감지)
@@ -62,7 +62,7 @@ OPTIONS:
 EXAMPLES:
     $0 -a localhost                           # 로컬 cj에 연결
     $0 -a 192.168.1.100 -n production-tc   # 원격 cj에 연결
-    $0 --check                               # 연결 상태 확인
+    $0 --check -a localhost                  # 연결 상태 확인
 
 DESCRIPTION:
     이 스크립트는 TC에서 실행하여 cj에 연결 요청을 전송합니다.
@@ -154,9 +154,95 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# --check만 사용한 경우 로컬 CJ를 기본값으로 사용
+if [ "$CHECK_ONLY" = true ] && [ -z "$CJ_HOST" ]; then
+    CJ_HOST="localhost"
+fi
+
+detect_primary_ip() {
+    # OS 분기 없이 공통 방식: UDP 소켓의 로컬 egress IP 사용
+    python3 - << 'PY'
+import socket
+
+ip = ""
+for target in ("1.1.1.1", "8.8.8.8"):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect((target, 80))
+        candidate = s.getsockname()[0]
+        s.close()
+        if candidate and not candidate.startswith("127."):
+            ip = candidate
+            break
+    except Exception:
+        pass
+
+if not ip:
+    try:
+        candidate = socket.gethostbyname(socket.gethostname())
+        if candidate and not candidate.startswith("127."):
+            ip = candidate
+    except Exception:
+        pass
+
+print(ip)
+PY
+}
+
+detect_kind_host_gateway_ip() {
+    docker exec cloud-janitor-cluster-control-plane sh -lc \
+        "getent hosts host.docker.internal 2>/dev/null | awk '{print \$1}' | head -n1" 2>/dev/null || true
+}
+
+is_prometheus_healthy() {
+    local url="$1"
+    curl -s --max-time 2 "$url/-/healthy" >/dev/null 2>&1
+}
+
+extract_host_from_url() {
+    local url="$1"
+    python3 - "$url" << 'PY'
+import sys
+from urllib.parse import urlparse
+
+u = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+try:
+    parsed = urlparse(u)
+    print(parsed.hostname or "")
+except Exception:
+    print("")
+PY
+}
+
+extract_port_from_url() {
+    local url="$1"
+    local default_port="${2:-9091}"
+    python3 - "$url" "$default_port" << 'PY'
+import sys
+from urllib.parse import urlparse
+
+u = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+default_port = int(sys.argv[2]) if len(sys.argv) > 2 else 9091
+try:
+    parsed = urlparse(u)
+    print(int(parsed.port or default_port))
+except Exception:
+    print(default_port)
+PY
+}
+
 resolve_default_prom_url() {
     local mapped=""
     local detected=""
+    local host_ip=""
+    local kind_host_ip=""
+    if [ "$CJ_HOST" = "localhost" ] || [ "$CJ_HOST" = "127.0.0.1" ]; then
+        kind_host_ip="$(detect_kind_host_gateway_ip)"
+    fi
+    if [ -z "$kind_host_ip" ]; then
+        host_ip="$(detect_primary_ip)"
+    fi
+    local port="9091"
 
     if [ -f "$MONITOR_COMPOSE_FILE" ] && docker compose version >/dev/null 2>&1; then
         mapped=$(docker compose -f "$MONITOR_COMPOSE_FILE" port prometheus 9090 2>/dev/null | tail -n1 || true)
@@ -165,15 +251,37 @@ resolve_default_prom_url() {
     fi
 
     if [ -n "$mapped" ]; then
-        local port="${mapped##*:}"
-        if [[ "$port" =~ ^[0-9]+$ ]]; then
-            detected="http://localhost:$port"
+        local mapped_port="${mapped##*:}"
+        if [[ "$mapped_port" =~ ^[0-9]+$ ]]; then
+            port="$mapped_port"
         fi
     fi
 
-    if [ -z "$detected" ]; then
-        detected="http://localhost:9091"
+    # 로컬 CJ+kind면 kind에서 닿는 host gateway를 우선 사용
+    if [ -n "$kind_host_ip" ]; then
+        echo "http://$kind_host_ip:$port"
+        return
     fi
+
+    # 그 외에는 로컬에서 확인 가능한 URL을 우선 선택
+    local candidates=()
+    if [ -n "$host_ip" ]; then
+        candidates+=("http://$host_ip:$port")
+    fi
+    candidates+=("http://localhost:$port" "http://127.0.0.1:$port")
+
+    local candidate=""
+    for candidate in "${candidates[@]}"; do
+        if is_prometheus_healthy "$candidate"; then
+            detected="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$detected" ]; then
+        detected="${candidates[0]}"
+    fi
+
     echo "$detected"
 }
 
@@ -198,8 +306,13 @@ log_success "cj 주소: $CJ_HOST:$CJ_PORT"
 # TC Prometheus 실행 확인
 log_info "TC Prometheus 실행 상태 확인..."
 
-if curl -s "$TC_PROM_URL/-/healthy" > /dev/null 2>&1; then
+LOCAL_CHECK_PORT="$(extract_port_from_url "$TC_PROM_URL" 9091)"
+LOCAL_CHECK_URL="http://localhost:${LOCAL_CHECK_PORT}"
+
+if is_prometheus_healthy "$TC_PROM_URL"; then
     log_success "TC Prometheus가 실행 중입니다: $TC_PROM_URL"
+elif is_prometheus_healthy "$LOCAL_CHECK_URL"; then
+    log_success "TC Prometheus가 실행 중입니다: $LOCAL_CHECK_URL (연결 URL: $TC_PROM_URL)"
 else
     log_warning "TC Prometheus에 연결할 수 없습니다: $TC_PROM_URL"
     log_info "Prometheus가 실행 중인지 확인해주세요."
@@ -242,7 +355,15 @@ print(",".join(out))
 
 # TC 정보 수집
 TC_HOSTNAME=$(hostname)
-TC_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")
+TC_URL_HOST="$(extract_host_from_url "$TC_PROM_URL")"
+if [[ "$TC_URL_HOST" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && [ "$TC_URL_HOST" != "127.0.0.1" ] && [ "$TC_URL_HOST" != "0.0.0.0" ]; then
+    TC_IP="$TC_URL_HOST"
+else
+    TC_IP="$(detect_primary_ip)"
+    if [ -z "$TC_IP" ]; then
+        TC_IP="unknown"
+    fi
+fi
 TC_OS=$(uname -s)
 TC_ARCH=$(uname -m)
 
@@ -597,12 +718,11 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
     echo "   4. cj가 TC Docker API로 좀비 컨테이너 삭제 (자동)"
     echo "   5. cj가 cj MySQL에 삭제 기록 저장 (자동)"
     echo ""
-    echo "✨ cj 배포 방법:"
-    echo "   cd .."
-    echo "   ./scripts/deploy-all.sh --skip-target"
+    echo "✨ cj 준비가 아직이라면 (CJ 서버에서 실행):"
+    echo "   cj setup"
+    echo "   cj start"
     echo ""
-    echo "   cj는 Terraform + Ansible으로만 배포하면 됩니다."
-    echo "   Cloud Janitor 앱이 자동으로 TC를 모니터링합니다."
+    echo "   이후 tc connect를 다시 실행하면 됩니다."
     echo ""
     echo "🔧 유용한 명령어:"
     echo "   - 연결 상태:      $0 --check -a $CJ_HOST"

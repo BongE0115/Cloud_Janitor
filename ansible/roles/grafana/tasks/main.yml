@@ -285,6 +285,8 @@
   ansible.builtin.set_fact:
     mysql_ds_uid: "{{ _mysql_ds.json.uid | default('mysql-main') }}"
     alert_email_addresses: "{{ env_vars['ALERT_EMAILS'] | default(env_vars['SMTP_USER'] | default('')) }}"
+    alert_folder_uid: "{{ env_vars['ALERT_FOLDER_UID'] | default('cloud-janitor') }}"
+    alert_folder_title: "{{ env_vars['ALERT_FOLDER_TITLE'] | default('Cloud Janitor') }}"
     alert_pending_for: "{{ env_vars['ALERT_PENDING_FOR'] | default('0s') }}"
     alert_deleted_for: "{{ env_vars['ALERT_DELETED_FOR'] | default('30s') }}"
     alert_rule_interval_seconds: "{{ (env_vars['ALERT_RULE_INTERVAL_SECONDS'] | default('30')) | int }}"
@@ -309,14 +311,18 @@
 
 # ── Alerting: Contact point / Policy / Rules ───────────────────────────────
 
-- name: Delete Cloud Janitor folder if exists (alerts will use root folder)
+- name: Ensure alert folder exists
   ansible.builtin.uri:
-    url: "{{ grafana_url }}/api/folders/cloud-janitor"
-    method: DELETE
+    url: "{{ grafana_url }}/api/folders"
+    method: POST
     user: "{{ grafana_admin_user }}"
     password: "{{ grafana_admin_password }}"
     force_basic_auth: true
-    status_code: [200, 404]
+    body_format: json
+    body:
+      uid: "{{ alert_folder_uid }}"
+      title: "{{ alert_folder_title }}"
+    status_code: [200, 412]
 
 - name: Load and apply contact point payload
   ansible.builtin.set_fact:
@@ -481,7 +487,7 @@
               | combine(
                   {
                     'uid': item.uid,
-                    'folderUID': '',
+                    'folderUID': alert_folder_uid,
                     'for': (alert_pending_for if item.name == 'pending' else alert_deleted_for),
                     'intervalSeconds': alert_rule_interval_seconds
                   },

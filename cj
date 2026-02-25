@@ -14,7 +14,6 @@
 #   cj stop              # 서비스 중지
 #   cj tunnel <cmd>      # SSH 터널 관리 (setup, stop, status)
 #   cj tf <command>      # Terraform 명령어 (init, apply, destroy, plan)
-#   cj ans <playbook>    # Ansible playbook 실행
 #   cj status            # 상태 확인
 #   cj logs <service>    # 로그 확인
 #   cj grafana           # Grafana 접속
@@ -106,14 +105,6 @@ check_terraform() {
     fi
 }
 
-# Ansible 설치 확인
-check_ansible() {
-    if ! command -v uv &> /dev/null; then
-        log_error "uv가 설치되어 있지 않습니다."
-        exit 1
-    fi
-}
-
 ensure_uv_sync() {
     if [ "${UV_SYNC_DONE:-false}" = "true" ]; then
         return 0
@@ -161,12 +152,53 @@ check_env_file() {
     return 0
 }
 
+load_cj_env() {
+    local env_file="$CJ_HOME/.env"
+    [ -f "$env_file" ] || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+
+        case "$line" in
+            ''|'#'*)
+                continue
+                ;;
+        esac
+
+        if [[ "$line" =~ ^[[:space:]]*# ]]; then
+            continue
+        fi
+
+        line="${line#export }"
+        if [[ "$line" != *=* ]]; then
+            continue
+        fi
+
+        local key="${line%%=*}"
+        local value="${line#*=}"
+
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+
+        if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            continue
+        fi
+
+        if [[ "$value" =~ ^\".*\"$ && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        elif [[ "$value" =~ ^\'.*\'$ && ${#value} -ge 2 ]]; then
+            value="${value:1:${#value}-2}"
+        fi
+
+        printf -v "$key" '%s' "$value"
+        export "$key"
+    done < "$env_file"
+}
+
 # SSH 터널 설정
 setup_ssh_tunnel() {
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
+    load_cj_env
 
     # CLI 옵션이 있으면 우선 사용, 없으면 .env/기본값 사용
     USE_SSH_TUNNEL="${CLI_USE_SSH_TUNNEL:-${USE_SSH_TUNNEL:-true}}"
@@ -231,10 +263,7 @@ setup_ssh_tunnel() {
 
 # SSH 터널 해제
 teardown_ssh_tunnel() {
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
+    load_cj_env
 
     TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
     PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
@@ -402,14 +431,9 @@ show_help() {
     echo "  tf output         Terraform 출력값 확인"
     echo "  tf shell          Terraform 쉘 실행 (terraform 명령어 직접 사용)"
     echo ""
-    echo -e "${BOLD}Ansible (레거시/수동):${NC}"
-    echo "  ans install       (레거시) Target Prometheus 접속 확인"
-    echo "  ans configure     (레거시) 수동 연동 작업"
-    echo "  ans shell         Ansible playbook 실행 쉘"
-    echo ""
     echo -e "${BOLD}상태 및 로그:${NC}"
     echo "  status            전체 시스템 상태 확인"
-    echo "  logs [service]    로그 확인 (janitor, mysql, grafana, loki)"
+    echo "  logs <service>    로그 확인 (janitor, mysql, grafana, loki)"
     echo "  scan              Cloud Janitor 수동 1회 스캔 실행"
     echo ""
     echo -e "${BOLD}접속:${NC}"
@@ -1052,74 +1076,6 @@ cmd_tf() {
 }
 
 # =============================================================================
-# Ansible 명령어
-# =============================================================================
-
-cmd_ans() {
-    local subcmd=$1
-    shift || true
-
-    check_ansible
-    check_docker
-    check_cj_home
-    ensure_uv_sync
-
-    export DOCKER_CONFIG="$CJ_HOME/.docker"
-
-    # .env 파일 로드
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
-
-    export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
-    export ANSIBLE_ROLES_PATH="$ANSIBLE_DIR/roles"
-    export ANSIBLE_LOCAL_TMP="${ANSIBLE_LOCAL_TMP:-/tmp/ansible}"
-    export ANSIBLE_REMOTE_TMP="${ANSIBLE_REMOTE_TMP:-/tmp/ansible}"
-    mkdir -p "$ANSIBLE_LOCAL_TMP"
-
-    cd "$CJ_HOME"
-
-    case $subcmd in
-        install)
-            log_step "📦 Ansible 레거시 안내"
-            log_warning "현재 권장 경로에서는 'cj ans install'이 필요하지 않습니다."
-            log_info "대신 다음을 사용하세요:"
-            echo "   tc connect -a <CJ_HOST> --check"
-            echo ""
-            log_info "다음 명령어 추천:"
-            echo "   tc connect -a <CJ_HOST> --check"
-            ;;
-            
-        configure)
-            log_step "🔧 Ansible 레거시 안내"
-            log_warning "현재 권장 경로에서는 'cj ans configure'가 필요하지 않습니다."
-            log_info "Target 등록/Prometheus datasource 갱신은 tc connect가 처리합니다."
-            log_info "필요한 경우에만 레거시 플레이북을 수동 실행하세요:"
-            echo "   uv run ansible-playbook $ANSIBLE_DIR/playbooks/setup-target.yml"
-            echo ""
-            log_info "다음 명령어 추천:"
-            echo "   tc connect -a <CJ_HOST>"
-            ;;
-            
-        shell)
-            log_info "Ansible 쉘 시작 (exit로 종료)"
-            bash
-            ;;
-            
-        *)
-            log_error "알 수 없는 Ansible 명령어: $subcmd"
-            echo ""
-            echo "사용 가능한 명령어:"
-            echo "  cj ans install       (레거시) 안내 출력"
-            echo "  cj ans configure     (레거시) 안내 출력"
-            echo "  cj ans shell          Ansible 쉘"
-            exit 1
-            ;;
-    esac
-}
-
-# =============================================================================
 # 상태 확인
 # =============================================================================
 
@@ -1287,7 +1243,7 @@ cmd_grafana() {
     
     # .env 파일 로드
     if [ -f "$CJ_HOME/.env" ]; then
-        source "$CJ_HOME/.env"
+        load_cj_env
         log_info "ID: admin, Password: ${GRAFANA_PASSWORD:-changeme}"
     else
         log_info "ID: admin, Password: changeme (.env 파일에서 GRAFANA_PASSWORD 설정)"
@@ -1433,10 +1389,7 @@ main() {
                     teardown_ssh_tunnel
                     ;;
                 status)
-                    if [ -f "$CJ_HOME/.env" ]; then
-                        # shellcheck disable=SC1090
-                        source "$CJ_HOME/.env"
-                    fi
+                    load_cj_env
                     TARGET_HOST="${CLI_TARGET_HOST:-${TARGET_HOST:-localhost}}"
                     PROMETHEUS_PORT="${CLI_PROMETHEUS_PORT:-${PROMETHEUS_PORT:-9091}}"
                     LOCAL_PROMETHEUS_PORT="${CLI_LOCAL_PORT:-${LOCAL_PROMETHEUS_PORT:-9091}}"
@@ -1460,9 +1413,6 @@ main() {
             ;;
         tf)
             cmd_tf "$@"
-            ;;
-        ans)
-            cmd_ans "$@"
             ;;
         status)
             cmd_status
