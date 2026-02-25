@@ -8,6 +8,15 @@
 cj <command> [options]
 ```
 
+## 사전 요구사항
+
+- Docker
+- Terraform
+- uv
+- kubectl
+- Helm
+- kind
+
 ## 주요 명령어
 
 | 명령어 | 설명 |

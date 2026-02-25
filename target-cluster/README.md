@@ -88,9 +88,17 @@ target-cluster/
 
 | 서비스 | URL |
 |--------|-----|
-| Prometheus | http://localhost:9091 |
+| Prometheus | http://localhost:\<자동 할당 포트\> (기본 후보: 9091, 19091, 29091, 39091) |
 | cAdvisor | http://localhost:8080 |
 | Promtail | (로그 전송용, 별도 UI 없음) |
+
+Prometheus 실제 포트 확인:
+
+```bash
+./tc pm status
+# 또는
+docker compose -f docker-compose.monitoring.yml port prometheus 9090
+```
 
 ## 문제 해결
 
@@ -98,6 +106,9 @@ target-cluster/
 
 ```bash
 lsof -i :9091
+lsof -i :19091
+lsof -i :29091
+lsof -i :39091
 lsof -i :8080
 lsof -i :8081
 lsof -i :8082

@@ -48,7 +48,7 @@ TC(Target Cluster) → cj(Cloud Janitor) 연결 요청 스크립트
 
 OPTIONS:
     -h, --help              이 도움말을 표시
-    -a, --cj-host HOST      cj(Cloud Janitor) 주소 (필수)
+    -a, --cj-host HOST      cj(Cloud Janitor) 주소 (등록 시 필수, --check 단독 시 localhost 기본값)
     -p, --cj-port PORT      cj API 포트 (기본값: CJ_PORT 또는 30800)
     -n, --name NAME         TC 이름 (기본값: tc-target)
     --prom-url URL          TC Prometheus URL (미지정 시 실행 중인 compose 기준 자동 감지)
@@ -62,7 +62,7 @@ OPTIONS:
 EXAMPLES:
     $0 -a localhost                           # 로컬 cj에 연결
     $0 -a 192.168.1.100 -n production-tc   # 원격 cj에 연결
-    $0 --check                               # 연결 상태 확인
+    $0 --check -a localhost                  # 연결 상태 확인
 
 DESCRIPTION:
     이 스크립트는 TC에서 실행하여 cj에 연결 요청을 전송합니다.
@@ -153,6 +153,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# --check만 사용한 경우 로컬 CJ를 기본값으로 사용
+if [ "$CHECK_ONLY" = true ] && [ -z "$CJ_HOST" ]; then
+    CJ_HOST="localhost"
+fi
 
 detect_primary_ip() {
     # OS 분기 없이 공통 방식: UDP 소켓의 로컬 egress IP 사용
@@ -713,12 +718,11 @@ if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
     echo "   4. cj가 TC Docker API로 좀비 컨테이너 삭제 (자동)"
     echo "   5. cj가 cj MySQL에 삭제 기록 저장 (자동)"
     echo ""
-    echo "✨ cj 배포 방법:"
-    echo "   cd .."
-    echo "   ./scripts/deploy-all.sh --skip-target"
+    echo "✨ cj 준비가 아직이라면 (CJ 서버에서 실행):"
+    echo "   cj setup"
+    echo "   cj start"
     echo ""
-    echo "   cj는 Terraform + Ansible으로만 배포하면 됩니다."
-    echo "   Cloud Janitor 앱이 자동으로 TC를 모니터링합니다."
+    echo "   이후 tc connect를 다시 실행하면 됩니다."
     echo ""
     echo "🔧 유용한 명령어:"
     echo "   - 연결 상태:      $0 --check -a $CJ_HOST"

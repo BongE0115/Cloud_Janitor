@@ -30,6 +30,9 @@ tc <command> [options]
 | `tc bootstrap -a <CJ_HOST>` | `install -> start -> pm start -> connect` 자동 실행 |
 | `tc help` | 도움말 출력 |
 
+`tc pm start`는 Prometheus 포트를 자동으로 선택할 수 있습니다.
+기본 후보는 `9091`, `19091`, `29091`, `39091`이며 실제 포트는 `tc pm status`로 확인합니다.
+
 ## `tc connect` 옵션
 
 `tc connect`는 `target-cluster/setup-connection-to-cj.sh`를 그대로 호출합니다.
@@ -40,7 +43,7 @@ tc connect -a <CJ_HOST> [options]
 
 주요 옵션:
 
-- `-a, --cj-host <HOST>`: CJ 주소 (필수)
+- `-a, --cj-host <HOST>`: CJ 주소 (등록 시 필수, `--check` 단독이면 기본 `localhost`)
 - `-p, --cj-port <PORT>`: CJ API 포트 (기본 `30800`)
 - `-n, --name <NAME>`: TC 이름 (기본 `tc-target`)
 - `--prom-url <URL>`: TC Prometheus URL (미지정 시 자동 감지)
@@ -56,6 +59,7 @@ tc connect -a <CJ_HOST> [options]
 ```bash
 tc connect -a localhost -n tc-target
 tc connect -a 192.168.1.100 --prom-url http://localhost:9091 --check
+tc connect --check
 ```
 
 ## `tc tunnel` 하위 명령어

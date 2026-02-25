@@ -145,8 +145,10 @@ TC에서 Prometheus와 앱을 실행하고, cj에서 설정/시작하여 연결�
 
 - Docker & Docker Compose
 - Terraform >= 1.14.4
+- uv
 - kubectl
 - Helm
+- kind
 - **target-cluster 앱과 Prometheus는 별도 실행**
 
 ### TC CLI 위치
@@ -165,32 +167,33 @@ TC에서 Prometheus와 앱을 실행하고, cj에서 설정/시작하여 연결�
 # ========================================
 # 🛠️ 수동 실행
 # ========================================
+# PATH가 아직 반영되지 않았다면 cj/tc 대신 ./cj ./tc로 실행
 
 # 2. 초기화
-cj init
+./cj init
 
 # 3. TC 앱 시작
-tc start
+./tc start
 
 # 4. TC Prometheus + Promtail 시작
-tc pm start
+./tc pm start
 
 # 5. cj 설정 (Grafana/Loki/MySQL 준비)
-cj setup
+./cj setup
 
 # 6. cj 서비스 시작
-cj start
+./cj start
 
 # 7. TC → cj 연결 요청
-tc connect -a localhost
+./tc connect -a localhost
 
 # (선택) TC에서 화이트리스트 직접 설정
 #  - base(고정): target-cluster/.env 의 CJ_CONTAINER_WHITELIST
 #    (whitelist 명령으로 수정되지 않음)
-#  - custom(사용자): tc whitelist set/add/remove/pick
+#  - custom(사용자): ./tc whitelist set/add/remove/pick
 #    (target-cluster/.whitelist.custom 에 저장)
-#  - 전송 방식: tc connect 시 base+custom을 합쳐 labels.container_whitelist로 동봉 전송
-#  - 실시간 반영: tc whitelist ... -a localhost -n tc-target
+#  - 전송 방식: ./tc connect 시 base+custom을 합쳐 labels.container_whitelist로 동봉 전송
+#  - 실시간 반영: ./tc whitelist ... -a localhost -n tc-target
 ```
 
 ## ⌨️ CLI 명령어 문서
@@ -198,7 +201,7 @@ tc connect -a localhost
 - CJ CLI 문서: [`docs/cj-cli.md`](docs/cj-cli.md)
 - TC CLI 문서: [`docs/tc-cli.md`](docs/tc-cli.md)
 
-각 문서는 실제 `./cj help`, `./tc help`, `setup-connection-to-cj.sh --help`, `whitelist.sh --help` 기준으로 정리되어 있습니다.
+각 문서는 실제 `./cj help`, `./tc help`, `./target-cluster/setup-connection-to-cj.sh --help`, `./target-cluster/whitelist.sh --help` 기준으로 정리되어 있습니다.
 
 ### 외부 TC 서버 시나리오
 
