@@ -25,7 +25,7 @@
     {
       "type": "stat",
       "title": "현재 좀비 수",
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -41,7 +41,7 @@
     {
       "type": "stat",
       "title": "현재 후보 수",
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -56,14 +56,30 @@
     },
     {
       "type": "stat",
-      "title": "현재 절감 추정 비용",
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "title": "누적 좀비 수 (정지/삭제)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
           "refId": "A",
           "format": "table",
-          "rawSql": "SELECT ROUND(COALESCE(SUM(zombie_count), 0) * 0.5, 2) AS value FROM scan_latest_summary;"
+          "rawSql": "SELECT COUNT(*) AS value FROM zombie_lifecycle WHERE status IN ('STOPPED','DELETED');"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "비용 절감 추정 비용",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "mysql", "uid": "mysql-main" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT ROUND(COALESCE(SUM(wasted_cost), 0), 2) AS value FROM zombie_lifecycle WHERE status IN ('STOPPED','DELETED');"
         }
       ],
       "fieldConfig": {
@@ -76,7 +92,7 @@
     {
       "type": "timeseries",
       "title": "감지 추이 (Zombie / Candidate / Active)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "timeFrom": "1h",
       "interval": "1m",
@@ -117,15 +133,13 @@
     },
     {
       "type": "timeseries",
-      "title": "네트워크 사용량 (컨테이너별)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
-      "datasource": { "type": "prometheus", "uid": "prometheus-main" },
-      "timeFrom": "1h",
-      "interval": "1m",
+      "title": "네트워크 사용량 (컨테이너별, RX+TX)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
-          "expr": "sum by (name) (irate(container_network_receive_bytes_total{id=~\".*(/docker/[a-f0-9]{12,64}|docker-[a-f0-9]{12,64}\\\\.scope).*\",interface!=\"lo\",name!=\"\",container_label_com_docker_compose_project=\"target-cluster\"}[5m])) + sum by (name) (irate(container_network_transmit_bytes_total{id=~\".*(/docker/[a-f0-9]{12,64}|docker-[a-f0-9]{12,64}\\\\.scope).*\",interface!=\"lo\",name!=\"\",container_label_com_docker_compose_project=\"target-cluster\"}[5m]))",
-          "legendFormat": "{{name}}",
+          "expr": "max by (tc_container) (last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\"} |= \"SCAN_CONTAINER\" | logfmt | unwrap net_b [5m]))",
+          "legendFormat": "{{tc_container}}",
           "refId": "A"
         }
       ],
@@ -134,36 +148,21 @@
     {
       "type": "table",
       "title": "현재 감지 컨테이너 상태 (Latest Scan)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 22 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
           "refId": "A",
           "format": "table",
-          "rawSql": "SELECT c.tc_name, c.tc_container, ROUND(c.cpu_m, 2) AS cpu_m, ROUND(c.mem_mi * 1.048576, 2) AS mem_mb, ROUND(c.net_b, 2) AS net_b, c.ctype, c.decision, c.reason FROM scan_latest_containers c JOIN scan_latest_summary s ON s.tc_name = c.tc_name AND s.cycle_id = c.cycle_id ORDER BY c.net_b DESC, c.tc_container;"
+          "rawSql": "SELECT c.tc_name, c.tc_container, ROUND(c.cpu_m, 2) AS cpu_m, ROUND(c.mem_mi, 2) AS mem_mi, ROUND(c.net_b, 2) AS net_b, c.ctype, c.decision, c.reason FROM scan_latest_containers c JOIN scan_latest_summary s ON s.tc_name = c.tc_name AND s.cycle_id = c.cycle_id ORDER BY c.net_b DESC, c.tc_container;"
         }
       ],
       "fieldConfig": {
         "defaults": {},
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "cpu_m" },
-            "properties": [
-              { "id": "displayName", "value": "CPU" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "mem_mb" },
-            "properties": [
-              { "id": "displayName", "value": "MEM(MB)" }
-            ]
-          },
-          {
             "matcher": { "id": "byName", "options": "net_b" },
-            "properties": [
-              { "id": "displayName", "value": "NET" },
-              { "id": "unit", "value": "binBps" }
-            ]
+            "properties": [{ "id": "unit", "value": "Bps" }]
           }
         ]
       },
@@ -180,7 +179,7 @@
     {
       "type": "logs",
       "title": "Janitor API 로그 (cloud-janitor)",
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 32 },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 38 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
@@ -188,12 +187,16 @@
           "refId": "A"
         }
       ],
-      "options": { "showTime": true, "enableLogDetails": true, "sortOrder": "Ascending" }
+      "options": {
+        "showTime": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending"
+      }
     },
     {
       "type": "logs",
       "title": "Janitor Scanner 로그 (cloud-janitor-scanner)",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 32 },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 38 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
@@ -201,7 +204,11 @@
           "refId": "A"
         }
       ],
-      "options": { "showTime": true, "enableLogDetails": true, "sortOrder": "Ascending" }
+      "options": {
+        "showTime": true,
+        "enableLogDetails": true,
+        "sortOrder": "Ascending"
+      }
     }
   ]
 }
