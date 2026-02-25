@@ -14,7 +14,6 @@
 #   cj stop              # 서비스 중지
 #   cj tunnel <cmd>      # SSH 터널 관리 (setup, stop, status)
 #   cj tf <command>      # Terraform 명령어 (init, apply, destroy, plan)
-#   cj ans <playbook>    # Ansible playbook 실행
 #   cj status            # 상태 확인
 #   cj logs <service>    # 로그 확인
 #   cj grafana           # Grafana 접속
@@ -102,14 +101,6 @@ check_docker() {
 check_terraform() {
     if ! command -v terraform &> /dev/null; then
         log_error "Terraform가 설치되어 있지 않습니다."
-        exit 1
-    fi
-}
-
-# Ansible 설치 확인
-check_ansible() {
-    if ! command -v uv &> /dev/null; then
-        log_error "uv가 설치되어 있지 않습니다."
         exit 1
     fi
 }
@@ -402,14 +393,9 @@ show_help() {
     echo "  tf output         Terraform 출력값 확인"
     echo "  tf shell          Terraform 쉘 실행 (terraform 명령어 직접 사용)"
     echo ""
-    echo -e "${BOLD}Ansible (레거시/수동):${NC}"
-    echo "  ans install       (레거시) Target Prometheus 접속 확인"
-    echo "  ans configure     (레거시) 수동 연동 작업"
-    echo "  ans shell         Ansible playbook 실행 쉘"
-    echo ""
     echo -e "${BOLD}상태 및 로그:${NC}"
     echo "  status            전체 시스템 상태 확인"
-    echo "  logs [service]    로그 확인 (janitor, mysql, grafana, loki)"
+    echo "  logs <service>    로그 확인 (janitor, mysql, grafana, loki)"
     echo "  scan              Cloud Janitor 수동 1회 스캔 실행"
     echo ""
     echo -e "${BOLD}접속:${NC}"
@@ -1052,74 +1038,6 @@ cmd_tf() {
 }
 
 # =============================================================================
-# Ansible 명령어
-# =============================================================================
-
-cmd_ans() {
-    local subcmd=$1
-    shift || true
-
-    check_ansible
-    check_docker
-    check_cj_home
-    ensure_uv_sync
-
-    export DOCKER_CONFIG="$CJ_HOME/.docker"
-
-    # .env 파일 로드
-    if [ -f "$CJ_HOME/.env" ]; then
-        # shellcheck disable=SC1090
-        source "$CJ_HOME/.env"
-    fi
-
-    export ANSIBLE_CONFIG="$ANSIBLE_DIR/ansible.cfg"
-    export ANSIBLE_ROLES_PATH="$ANSIBLE_DIR/roles"
-    export ANSIBLE_LOCAL_TMP="${ANSIBLE_LOCAL_TMP:-/tmp/ansible}"
-    export ANSIBLE_REMOTE_TMP="${ANSIBLE_REMOTE_TMP:-/tmp/ansible}"
-    mkdir -p "$ANSIBLE_LOCAL_TMP"
-
-    cd "$CJ_HOME"
-
-    case $subcmd in
-        install)
-            log_step "📦 Ansible 레거시 안내"
-            log_warning "현재 권장 경로에서는 'cj ans install'이 필요하지 않습니다."
-            log_info "대신 다음을 사용하세요:"
-            echo "   tc connect -a <CJ_HOST> --check"
-            echo ""
-            log_info "다음 명령어 추천:"
-            echo "   tc connect -a <CJ_HOST> --check"
-            ;;
-            
-        configure)
-            log_step "🔧 Ansible 레거시 안내"
-            log_warning "현재 권장 경로에서는 'cj ans configure'가 필요하지 않습니다."
-            log_info "Target 등록/Prometheus datasource 갱신은 tc connect가 처리합니다."
-            log_info "필요한 경우에만 레거시 플레이북을 수동 실행하세요:"
-            echo "   uv run ansible-playbook $ANSIBLE_DIR/playbooks/setup-target.yml"
-            echo ""
-            log_info "다음 명령어 추천:"
-            echo "   tc connect -a <CJ_HOST>"
-            ;;
-            
-        shell)
-            log_info "Ansible 쉘 시작 (exit로 종료)"
-            bash
-            ;;
-            
-        *)
-            log_error "알 수 없는 Ansible 명령어: $subcmd"
-            echo ""
-            echo "사용 가능한 명령어:"
-            echo "  cj ans install       (레거시) 안내 출력"
-            echo "  cj ans configure     (레거시) 안내 출력"
-            echo "  cj ans shell          Ansible 쉘"
-            exit 1
-            ;;
-    esac
-}
-
-# =============================================================================
 # 상태 확인
 # =============================================================================
 
@@ -1460,9 +1378,6 @@ main() {
             ;;
         tf)
             cmd_tf "$@"
-            ;;
-        ans)
-            cmd_ans "$@"
             ;;
         status)
             cmd_status

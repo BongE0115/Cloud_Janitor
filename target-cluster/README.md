@@ -2,6 +2,11 @@
 
 Target Cluster(TC)는 Cloud Janitor의 모니터링 대상인 오래된 시스템입니다.
 
+## CLI 문서
+
+- TC 명령어 전체: [`../docs/tc-cli.md`](../docs/tc-cli.md)
+- CJ 명령어 전체: [`../docs/cj-cli.md`](../docs/cj-cli.md)
+
 ## 아키텍처
 
 ```
