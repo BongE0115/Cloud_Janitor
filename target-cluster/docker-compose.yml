@@ -3,132 +3,428 @@
 # TC 고유 애플리케이션 컨테이너만 실행
 # =============================================================================
 
+version: '3.8'
+
 services:
-  # -----------------------------------------------------------------------------
-  # Dummy Application 1: Active Web Server (정상 동작 앱)
-  # -----------------------------------------------------------------------------
-  app-active:
+  # ============================================================================
+  # [🔥 코어 인프라] 내부 트래픽 발생용 더미 서버 (외부 인터넷 차단 방지용)
+  # ============================================================================
+  internal-dummy-server:
     image: nginx:alpine
-    container_name: app-active
+    container_name: internal-dummy-server
     restart: unless-stopped
-    ports:
-      - "8081:80"
+    networks:
+      - target-network
+    # 10MB짜리 더미 파일과 가짜 API 엔드포인트를 켜자마자 만듭니다.
+    command: >
+      sh -c "mkdir -p /usr/share/nginx/html/api &&
+             dd if=/dev/zero of=/usr/share/nginx/html/dummy_10mb.bin bs=1M count=10 2>/dev/null &&
+             echo '{\"status\":\"ok\"}' > /usr/share/nginx/html/api/endpoint &&
+             nginx -g 'daemon off;'"
+
+  # ============================================================================
+  # [정상 작동 파드 - 15개] 고부하 및 지속적인 작업 수행
+  # ============================================================================
+
+  # 1. LLM-Train-Master 
+  # [지표: 높은 CPU, 중간 Mem]
+  llm-train-master:
+    image: alpine:latest
+    container_name: llm-train-master
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+      role: "master-node"
+    command: >
+      sh -c "echo 'Master Node Syncing...' && while true; do dd if=/dev/zero of=/dev/null bs=1M count=100 2>/dev/null; sleep 0.1; done"
+
+  # 2. LLM-Train-Worker-01 
+  # [지표: 높은 CPU, 중간 Mem]
+  llm-train-worker-01:
+    image: alpine:latest
+    container_name: llm-train-worker-01
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+      role: "gpu-worker"
+    command: >
+      sh -c "echo 'Worker computing...' && while true; do dd if=/dev/zero of=/dev/null bs=1M count=80 2>/dev/null; sleep 0.2; done"
+
+  # 3. HuggingFace-Data-Loader 
+  # [지표: 극단적인 Net Rx(수신), 약간의 CPU] -> 내부 더미 서버에서 다운로드
+  hf-data-loader:
+    image: alpine:latest
+    container_name: hf-data-loader
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+      role: "data-loader"
+    command: >
+      sh -c "apk add --no-cache curl && while true; do curl -s http://internal-dummy-server/dummy_10mb.bin > /dev/null; sleep 1; done"
+
+  # 4. BPE-Tokenizer-Engine 
+  # [지표: CPU 100%, 높은 Disk Write]
+  bpe-tokenizer-engine:
+    image: busybox:latest
+    container_name: bpe-tokenizer-engine
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+      role: "tokenizer"
+    command: >
+      sh -c "while true; do echo 'Tokenizing...' > /tmp/tokens.txt; cat /tmp/tokens.txt > /dev/null; done"
+
+  # 5. Corpus-Quality-Filter 
+  # [지표: 높은 CPU]
+  corpus-quality-filter:
+    image: alpine:latest
+    container_name: corpus-quality-filter
+    restart: unless-stopped
     networks:
       - target-network
     labels:
       app-type: "active"
     command: >
-      sh -c "
-      echo 'Starting active web server...' &&
-      nginx -g 'daemon off;' &
-      while true; do
-        for i in $$(seq 1 100); do
-          echo $$i > /dev/null
-        done
-        curl -s http://localhost/ > /dev/null 2>&1 || true
-        sleep 1
-      done
-      "
+      sh -c "while true; do grep -q 'noise' /etc/passwd 2>/dev/null || true; done"
 
-  # -----------------------------------------------------------------------------
-  # Dummy Application 2: Zombie-like Idle Container
-  # -----------------------------------------------------------------------------
-  app-zombie-sleeper:
-    image: busybox:latest
-    container_name: app-zombie-sleeper
+  # 6. Synthetic-Data-Generator 
+  # [지표: 지속적인 Net Rx/Tx, 중간 CPU] -> 내부 API 호출
+  synthetic-data-generator:
+    image: alpine:latest
+    container_name: synthetic-data-generator
     restart: unless-stopped
     networks:
       - target-network
     labels:
-      app-type: "zombie"
-      zombie-type: "idle"
-    command: ["sleep", "infinity"]
-    deploy:
-      resources:
-        limits:
-          cpus: '0.05'
-          memory: 64M
-        reservations:
-          cpus: '0.01'
-          memory: 16M
+      app-type: "active"
+    command: >
+      sh -c "apk add --no-cache curl && while true; do curl -s http://internal-dummy-server/api/endpoint > /dev/null; sleep 0.5; done"
 
-  # -----------------------------------------------------------------------------
-  # Dummy Application 3: Zombie-like Completed Container
-  # -----------------------------------------------------------------------------
-  app-zombie-completed:
+  # 7. LoRA-Adapter-Trainer 
+  # [지표: 안정적인 중간 CPU]
+  lora-adapter-trainer:
     image: alpine:latest
-    container_name: app-zombie-completed
+    container_name: lora-adapter-trainer
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "while true; do dd if=/dev/zero of=/dev/null bs=1M count=30 2>/dev/null; sleep 0.5; done"
+
+  # 8. WandB-Tracking-Agent 
+  # [지표: 규칙적인 Net Tx(송신)] -> 내부 API로 데이터 쏘기
+  wandb-tracking-agent:
+    image: alpine:latest
+    container_name: wandb-tracking-agent
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "apk add --no-cache curl && while true; do curl -X POST -s http://internal-dummy-server/api/endpoint -d 'loss=0.01' > /dev/null; sleep 2; done"
+
+  # 9. RAG-Embedding-Cache 
+  # [지표: 높은 Mem(메모리), CPU 0]
+  rag-embedding-cache:
+    image: redis:alpine
+    container_name: rag-embedding-cache
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+
+  # 10. Text-Embedding-Server 
+  # [지표: 짧고 잦은 CPU 스파이크]
+  text-embedding-server:
+    image: alpine:latest
+    container_name: text-embedding-server
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "while true; do dd if=/dev/zero of=/dev/null bs=1M count=50 2>/dev/null; sleep 3; done"
+
+  # 11. Truth-Checker-Model 
+  # [지표: 지속적인 CPU 부하]
+  truth-checker-model:
+    image: alpine:latest
+    container_name: truth-checker-model
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "while true; do let a=1+1; done"
+
+  # 12. Model-Checkpoint-Zipper 
+  # [지표: 극단적인 Disk Write/Read, 높은 CPU, Net 0]
+  model-checkpoint-zipper:
+    image: alpine:latest
+    container_name: model-checkpoint-zipper
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "while true; do dd if=/dev/zero of=/tmp/dump.tar bs=1M count=100 2>/dev/null && rm /tmp/dump.tar; sleep 1; done"
+
+  # 13. Kube-Karpenter-Agent 
+  # [지표: 미세한 CPU 부하]
+  kube-karpenter-agent:
+    image: alpine:latest
+    container_name: kube-karpenter-agent
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "while true; do echo 'Checking nodes...'; sleep 2; done"
+
+  # 14. Lustre-CSI-Driver 
+  # [지표: 가벼운 CPU 및 Disk Read]
+  lustre-csi-driver:
+    image: busybox:latest
+    container_name: lustre-csi-driver
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "while true; do ls -la / > /dev/null; sleep 1; done"
+
+  # 15. Eval-Harness-Runner 
+  # [지표: 복합적인 CPU 스파이크 및 Mem]
+  eval-harness-runner:
+    image: alpine:latest
+    container_name: eval-harness-runner
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "active"
+    command: >
+      sh -c "while true; do dd if=/dev/zero of=/dev/null bs=1M count=70 2>/dev/null; sleep 1; done"
+
+  # ============================================================================
+  # [좀비 파드 - 7개] 모든 자원 사용량 0 (완벽한 깡통)
+  # ============================================================================
+
+  # 16. Finished-LLaMA-Tuning 
+  # [지표: CPU 0, Mem 고정, Net 0]
+  finished-llama-tuning:
+    image: alpine:latest
+    container_name: finished-llama-tuning
     restart: unless-stopped
     networks:
       - target-network
     labels:
       app-type: "zombie"
       zombie-type: "completed"
-    command: >
-      sh -c "
-      echo 'Task completed. Waiting for cleanup...' &&
-      sleep infinity
-      "
-    deploy:
-      resources:
-        limits:
-          cpus: '0.02'
-          memory: 32M
-        reservations:
-          cpus: '0.005'
-          memory: 8M
+    command: ["sh", "-c", "echo 'Training Finished. Saving Weights...' && sleep infinity"]
 
-  # -----------------------------------------------------------------------------
-  # Dummy Application 4: Zombie-like Test Container
-  # -----------------------------------------------------------------------------
-  app-zombie-test:
+  # 17. OOM-Hung-Trainer 
+  # [지표: CPU 0, Mem 고정(데드락), Net 0]
+  oom-hung-trainer:
+    image: busybox:latest
+    container_name: oom-hung-trainer
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      zombie-type: "deadlock"
+    command: ["sleep", "infinity"]
+
+  # 18. S3-Auth-Failed-Loader 
+  # [지표: CPU 0, Mem 최소, Net 0]
+  s3-auth-failed-loader:
+    image: alpine:latest
+    container_name: s3-auth-failed-loader
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      zombie-type: "error-loop"
+    command: ["sh", "-c", "echo '403 Forbidden: S3 Token Expired'; sleep infinity"]
+
+  # 19. Disk-Full-Saver 
+  # [지표: CPU 0, Mem 최소, Disk Wait(멈춤)]
+  disk-full-saver:
+    image: alpine:latest
+    container_name: disk-full-saver
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      zombie-type: "io-wait"
+    command: ["sh", "-c", "echo 'No space left on device'; sleep infinity"]
+
+  # 20. Orphaned-Jupyter-Lab 
+  # [지표: 전부 0]
+  orphaned-jupyter-lab:
     image: nginx:alpine
-    container_name: app-zombie-test
+    container_name: orphaned-jupyter-lab
     restart: unless-stopped
-    ports:
-      - "8082:80"
     networks:
       - target-network
     labels:
       app-type: "zombie"
-      zombie-type: "forgotten"
-      environment: "test"
-    command: >
-      sh -c "
-      echo 'Test environment finished. Nobody cleaned me up.' &&
-      nginx -g 'daemon off;' &
-      sleep infinity
-      "
-    deploy:
-      resources:
-        limits:
-          cpus: '0.02'
-          memory: 64M
-        reservations:
-          cpus: '0.01'
-          memory: 16M
+      zombie-type: "idle"
+    command: ["nginx", "-g", "daemon off;"]
 
-  # -----------------------------------------------------------------------------
-  # Dummy Application 5: Zombie-like Dev Container
-  # -----------------------------------------------------------------------------
-  app-zombie-dev:
-    image: redis:alpine
-    container_name: app-zombie-dev
+  # 21. v1-Inference-Endpoint 
+  # [지표: 전부 0]
+  v1-inference-endpoint:
+    image: nginx:alpine
+    container_name: v1-inference-endpoint
     restart: unless-stopped
     networks:
       - target-network
     labels:
       app-type: "zombie"
-      zombie-type: "stale"
-      environment: "dev"
-    deploy:
-      resources:
-        limits:
-          cpus: '0.02'
-          memory: 64M
-        reservations:
-          cpus: '0.005'
-          memory: 16M
+      zombie-type: "abandoned-api"
+    command: ["nginx", "-g", "daemon off;"]
+
+  # 22. GPU-Pending-Zombie 
+  # [지표: 전부 0]
+  gpu-pending-zombie:
+    image: busybox:latest
+    container_name: gpu-pending-zombie
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "zombie"
+      zombie-type: "pending"
+    command: ["sleep", "infinity"]
+
+  # ============================================================================
+  # [특정 시간에만 작동 - 8개] 스케일 다운 (최대 40분 주기)
+  # ============================================================================
+
+  # 23. S3-Checkpoint-Syncer 
+  # [지표: 9분간 전부 0 -> 1분간 강력한 CPU 및 Net Tx]
+  s3-checkpoint-syncer:
+    image: alpine:latest
+    container_name: s3-checkpoint-syncer
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "while true; do sleep 540; echo 'Syncing to S3...'; dd if=/dev/zero of=/dev/null bs=1M count=200 2>/dev/null; sleep 60; done"
+
+  # 24. Daily-Corpus-Validator 
+  # [지표: 39분간 전부 0 -> 1분간 극단적 CPU 및 Disk 스파이크]
+  daily-corpus-validator:
+    image: alpine:latest
+    container_name: daily-corpus-validator
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "while true; do sleep 2340; echo 'Validating Corpus...'; dd if=/dev/zero of=/dev/null bs=1M count=500 2>/dev/null; sleep 60; done"
+
+  # 25. GPU-Lock-Sweeper 
+  # [지표: 55초간 전부 0 -> 5초간 가벼운 Net Tx]
+  gpu-lock-sweeper:
+    image: alpine:latest
+    container_name: gpu-lock-sweeper
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "while true; do sleep 55; echo 'Clearing locks...'; sleep 5; done"
+
+  # 26. Inference-Metrics-Aggregator 
+  # [지표: 170초 대기 -> 10초간 Net Rx/Tx 및 CPU]
+  inference-metrics-aggregator:
+    image: alpine:latest
+    container_name: inference-metrics-aggregator
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "apk add --no-cache curl && while true; do sleep 170; curl -s http://internal-dummy-server/api/endpoint > /dev/null; sleep 10; done"
+
+  # 27. Weekly-Cache-Evictor 
+  # [지표: 19분 대기 -> 1분간 CPU 및 Disk 스파이크]
+  weekly-cache-evictor:
+    image: busybox:latest
+    container_name: weekly-cache-evictor
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "while true; do sleep 1140; echo 'Evicting caches...'; dd if=/dev/zero of=/dev/null bs=1M count=300 2>/dev/null; sleep 60; done"
+
+  # 28. HF-Model-Syncer 
+  # [지표: 290초 대기 -> 10초간 Net Rx/Tx]
+  hf-model-syncer:
+    image: alpine:latest
+    container_name: hf-model-syncer
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "apk add --no-cache curl && while true; do sleep 290; curl -s http://internal-dummy-server/api/endpoint > /dev/null; sleep 10; done"
+
+  # 29. Nvidia-SMI-Alerter 
+  # [지표: 28초 대기 -> 2초간 가벼운 CPU]
+  nvidia-smi-alerter:
+    image: busybox:latest
+    container_name: nvidia-smi-alerter
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "while true; do sleep 28; echo 'GPU Temp OK'; sleep 2; done"
+
+  # 30. Midnight-RLHF-Cron 
+  # [지표: 35분 대기 -> 5분간 CPU/Mem 풀 부하]
+  midnight-rlhf-cron:
+    image: alpine:latest
+    container_name: midnight-rlhf-cron
+    restart: unless-stopped
+    networks:
+      - target-network
+    labels:
+      app-type: "periodic"
+    command: >
+      sh -c "while true; do sleep 2100; echo 'Starting RLHF...'; dd if=/dev/zero of=/dev/null bs=1M count=1000 2>/dev/null; sleep 300; done"
 
 networks:
   target-network:
