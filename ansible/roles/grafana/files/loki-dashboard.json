@@ -25,7 +25,7 @@
     {
       "type": "stat",
       "title": "현재 좀비 수",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -41,7 +41,7 @@
     {
       "type": "stat",
       "title": "현재 후보 수",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -57,7 +57,7 @@
     {
       "type": "stat",
       "title": "누적 좀비 수 (정지/삭제)",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -73,7 +73,7 @@
     {
       "type": "stat",
       "title": "비용 절감 효과 (예상 / 누적)",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
