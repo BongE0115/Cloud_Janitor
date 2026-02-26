@@ -92,7 +92,7 @@
     {
       "type": "timeseries",
       "title": "감지 추이 (Zombie / Candidate / Active)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 12 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "timeFrom": "1h",
       "interval": "1m",
@@ -133,9 +133,46 @@
     },
     {
       "type": "timeseries",
-      "title": "네트워크 사용량 (컨테이너별, RX+TX)",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "title": "CPU 사용량 (m)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
       "datasource": { "type": "loki", "uid": "loki-main" },
+      "timeFrom": "1h",
+      "interval": "1m",
+      "maxDataPoints": 60,
+      "targets": [
+        {
+          "expr": "max by (tc_container) (last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\", namespace=~\"$namespace\"} |= \"SCAN_CONTAINER\" | logfmt | unwrap cpu_m [5m]))",
+          "legendFormat": "{{tc_container}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "메모리 사용량 (MiB)",
+      "gridPos": { "h": 8, "w": 24, "x": 8, "y": 22 },
+      "datasource": { "type": "loki", "uid": "loki-main" },
+      "timeFrom": "1h",
+      "interval": "1m",
+      "maxDataPoints": 60,
+      "targets": [
+        {
+          "expr": "max by (tc_container) (last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\", namespace=~\"$namespace\"} |= \"SCAN_CONTAINER\" | logfmt | unwrap mem_mi [5m]))",
+          "legendFormat": "{{tc_container}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "mbytes" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "네트워크 사용량 (컨테이너별, RX+TX)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "datasource": { "type": "loki", "uid": "loki-main" },
+      "timeFrom": "1h",
+      "interval": "1m",
+      "maxDataPoints": 60,
       "targets": [
         {
           "expr": "max by (tc_container) (last_over_time({app=~\"cloud-janitor|cloud-janitor-scanner\"} |= \"SCAN_CONTAINER\" | logfmt | unwrap net_b [5m]))",
@@ -148,7 +185,7 @@
     {
       "type": "table",
       "title": "현재 감지 컨테이너 상태 (Latest Scan)",
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 28 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 38 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
@@ -179,7 +216,7 @@
     {
       "type": "logs",
       "title": "Janitor API 로그 (cloud-janitor)",
-      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 38 },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 48 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
@@ -196,7 +233,7 @@
     {
       "type": "logs",
       "title": "Janitor Scanner 로그 (cloud-janitor-scanner)",
-      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 38 },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 48 },
       "datasource": { "type": "loki", "uid": "loki-main" },
       "targets": [
         {
