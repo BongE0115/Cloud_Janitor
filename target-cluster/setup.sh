@@ -242,7 +242,7 @@ fi
 
 log_info "Docker 네트워크 생성 중..."
 docker network create tc-network 2>/dev/null || log_warning "네트워크가 이미 존재합니다."
-APP_CONTAINERS="internal-dummy-server llm-train-master llm-train-worker-01 hf-data-loader bpe-tokenizer-engine corpus-quality-filter synthetic-data-generator lora-adapter-trainer wandb-tracking-agent rag-embedding-cache text-embedding-server truth-checker-model model-checkpoint-zipper kube-karpenter-agent lustre-csi-driver eval-harness-runner finished-llama-tuning oom-hung-trainer s3-auth-failed-loader disk-full-saver orphaned-jupyter-lab v1-inference-endpoint gpu-pending-zombie s3-checkpoint-syncer daily-corpus-validator gpu-lock-sweeper inference-metrics-aggregator weekly-cache-evictor hf-model-syncer nvidia-smi-alerter midnight-rlhf-cron"
+APP_CONTAINERS="internal-dummy-server llm-train-master llm-train-worker-01 hf-data-loader bpe-tokenizer-engine corpus-quality-filter finished-llama-tuning oom-hung-trainer s3-auth-failed-loader disk-full-saver orphaned-jupyter-lab v1-inference-endpoint gpu-pending-zombie s3-checkpoint-syncer daily-corpus-validator gpu-lock-sweeper inference-metrics-aggregator weekly-cache-evictor hf-model-syncer nvidia-smi-alerter midnight-rlhf-cron"
 
 if [ "$PULL_IMAGES" = true ]; then
     log_info "Docker 이미지 다운로드 중..."

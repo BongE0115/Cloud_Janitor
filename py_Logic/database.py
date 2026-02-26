@@ -710,6 +710,9 @@ def accumulate_wasted_cost(config=None):
         cpu_rate = float((config or {}).get("CPU_COST_PER_M_PER_SEC", os.getenv("CPU_COST_PER_M_PER_SEC", "0.0")))
         mem_rate = float((config or {}).get("MEM_COST_PER_MI_PER_SEC", os.getenv("MEM_COST_PER_MI_PER_SEC", "0.0")))
         net_rate = float((config or {}).get("NET_COST_PER_B_PER_SEC",  os.getenv("NET_COST_PER_B_PER_SEC",  "0.0")))
+        
+        base_hourly_cost = float((config or {}).get("BASE_POD_COST_PER_HOUR", os.getenv("BASE_POD_COST_PER_HOUR", "0.1")))
+        base_rate_per_sec = base_hourly_cost / 3600.0
 
         cursor.execute(
             """
@@ -717,20 +720,30 @@ def accumulate_wasted_cost(config=None):
             SET
               wasted_cost = wasted_cost + (
                 GREATEST(
-                  TIMESTAMPDIFF(SECOND, COALESCE(last_cost_calc_at, stopped_at), UTC_TIMESTAMP()),
+                  TIMESTAMPDIFF(SECOND, 
+                    COALESCE(last_cost_calc_at, detected_at),
+                    
+                    
+                    CASE 
+                        WHEN status = 'STOPPED' AND stopped_at IS NOT NULL THEN stopped_at 
+                        ELSE UTC_TIMESTAMP() 
+                    END
+                  ),
                   0
                 )
                 *
                 (
-                  (cpu_m * %s) + (mem_mi * %s) + (net_b * %s)
+                  %s + (cpu_m * %s) + (mem_mi * %s) + (net_b * %s)
                 )
               ),
+              
               last_cost_calc_at = UTC_TIMESTAMP(),
               updated_at = UTC_TIMESTAMP()
-            WHERE status='STOPPED'
-              AND stopped_at IS NOT NULL
+            
+            WHERE status IN ('PENDING', 'CANDIDATE') 
+               OR (status = 'STOPPED' AND last_cost_calc_at < stopped_at)
             """,
-            (cpu_rate, mem_rate, net_rate),
+            (base_rate_per_sec, cpu_rate, mem_rate, net_rate),
         )
         conn.commit()
         return cursor.rowcount

@@ -23,7 +23,7 @@ services:
              nginx -g 'daemon off;'"
 
   # ============================================================================
-  # [정상 작동 파드 - 15개] 고부하 및 지속적인 작업 수행
+  # [정상 작동 파드 - 5개] 고부하 및 지속적인 작업 수행
   # ============================================================================
 
   # 1. LLM-Train-Master 
@@ -94,134 +94,6 @@ services:
       app-type: "active"
     command: >
       sh -c "while true; do grep -q 'noise' /etc/passwd 2>/dev/null || true; done"
-
-  # 6. Synthetic-Data-Generator 
-  # [지표: 지속적인 Net Rx/Tx, 중간 CPU] -> 내부 API 호출
-  synthetic-data-generator:
-    image: alpine:latest
-    container_name: synthetic-data-generator
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "apk add --no-cache curl && while true; do curl -s http://internal-dummy-server/api/endpoint > /dev/null; sleep 0.5; done"
-
-  # 7. LoRA-Adapter-Trainer 
-  # [지표: 안정적인 중간 CPU]
-  lora-adapter-trainer:
-    image: alpine:latest
-    container_name: lora-adapter-trainer
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "while true; do dd if=/dev/zero of=/dev/null bs=1M count=30 2>/dev/null; sleep 0.5; done"
-
-  # 8. WandB-Tracking-Agent 
-  # [지표: 규칙적인 Net Tx(송신)] -> 내부 API로 데이터 쏘기
-  wandb-tracking-agent:
-    image: alpine:latest
-    container_name: wandb-tracking-agent
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "apk add --no-cache curl && while true; do curl -X POST -s http://internal-dummy-server/api/endpoint -d 'loss=0.01' > /dev/null; sleep 2; done"
-
-  # 9. RAG-Embedding-Cache 
-  # [지표: 높은 Mem(메모리), CPU 0]
-  rag-embedding-cache:
-    image: redis:alpine
-    container_name: rag-embedding-cache
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-
-  # 10. Text-Embedding-Server 
-  # [지표: 짧고 잦은 CPU 스파이크]
-  text-embedding-server:
-    image: alpine:latest
-    container_name: text-embedding-server
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "while true; do dd if=/dev/zero of=/dev/null bs=1M count=50 2>/dev/null; sleep 3; done"
-
-  # 11. Truth-Checker-Model 
-  # [지표: 지속적인 CPU 부하]
-  truth-checker-model:
-    image: alpine:latest
-    container_name: truth-checker-model
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "while true; do let a=1+1; done"
-
-  # 12. Model-Checkpoint-Zipper 
-  # [지표: 극단적인 Disk Write/Read, 높은 CPU, Net 0]
-  model-checkpoint-zipper:
-    image: alpine:latest
-    container_name: model-checkpoint-zipper
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "while true; do dd if=/dev/zero of=/tmp/dump.tar bs=1M count=100 2>/dev/null && rm /tmp/dump.tar; sleep 1; done"
-
-  # 13. Kube-Karpenter-Agent 
-  # [지표: 미세한 CPU 부하]
-  kube-karpenter-agent:
-    image: alpine:latest
-    container_name: kube-karpenter-agent
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "while true; do echo 'Checking nodes...'; sleep 2; done"
-
-  # 14. Lustre-CSI-Driver 
-  # [지표: 가벼운 CPU 및 Disk Read]
-  lustre-csi-driver:
-    image: busybox:latest
-    container_name: lustre-csi-driver
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "while true; do ls -la / > /dev/null; sleep 1; done"
-
-  # 15. Eval-Harness-Runner 
-  # [지표: 복합적인 CPU 스파이크 및 Mem]
-  eval-harness-runner:
-    image: alpine:latest
-    container_name: eval-harness-runner
-    restart: unless-stopped
-    networks:
-      - target-network
-    labels:
-      app-type: "active"
-    command: >
-      sh -c "while true; do dd if=/dev/zero of=/dev/null bs=1M count=70 2>/dev/null; sleep 1; done"
 
   # ============================================================================
   # [좀비 파드 - 7개] 모든 자원 사용량 0 (완벽한 깡통)
