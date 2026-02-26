@@ -72,16 +72,22 @@
     },
     {
       "type": "stat",
-      "title": "비용 절감 추정 비용",
+      "title": "비용 절감 효과 (예상 / 누적)",
       "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "mysql", "uid": "mysql-main" },
       "targets": [
         {
           "refId": "A",
           "format": "table",
-          "rawSql": "SELECT ROUND(COALESCE(SUM(wasted_cost), 0), 2) AS value FROM zombie_lifecycle WHERE status IN ('STOPPED','DELETED');"
+          "rawSql": "SELECT COUNT(*) * (0.02 * 24 * 30) as Projected, COALESCE(SUM(CASE WHEN status = 'STOPPED' AND stopped_at IS NOT NULL THEN TIMESTAMPDIFF(SECOND, stopped_at, UTC_TIMESTAMP()) * (0.02 / 3600) ELSE 0 END), 0) as Realized FROM zombie_lifecycle WHERE status IN ('PENDING', 'CANDIDATE', 'STOPPED');"
         }
       ],
+      "options": {
+        "textMode": "value",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
