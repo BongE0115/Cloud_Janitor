@@ -114,17 +114,12 @@ flowchart TB
 
 TC에서 Prometheus와 앱을 실행하고, cj에서 설정/시작하여 연결합니다.
 
-### Janitor 로그 소스 구분
+### 전체 네트워크 인프라 오버뷰 (Overall)
 
-| app 라벨 | 실행 주체 | 용도 |
-|----------|-----------|------|
-| `cloud-janitor` | Deployment (API 서버) | 등록 API, 수동 스캔 실행 로그, 서비스 상태 로그 |
-| `cloud-janitor-scanner` | CronJob (주기 스캔) | 자동 주기 스캔 결과 로그 (`SCAN_CYCLE_*`, `SCAN_CONTAINER`) |
-| `cloud-janitor-cleanup` | CronJob (주기 정리) | 유예기간 만료 대상 정리 로그 (`CLEANUP_*`) |
-
-### 확장 네트워크 토폴로지 (3.3)
-
-아래 다이어그램은 실제 런타임 서비스와 도구 적용 지점을 함께 표현한 확장 구조입니다.
+아래 다이어그램은 CJ/TC 구조를 **전체 관점(Overall)** 으로 보여줍니다.
+- 위쪽: 실행 단계별 기술 스택 흐름 (CLI -> Terraform -> Helm/Ansible -> Runtime -> kubectl)
+- 아래쪽: 실제 런타임 배치(CJ/TC)와 서비스 간 네트워크 경로
+- 점선: 도구가 어떤 런타임 대상에 적용되는지(pointing)
 
 ```mermaid
 %%{init: {"theme":"base","flowchart":{"curve":"linear","nodeSpacing":20,"rankSpacing":38},"themeVariables":{"lineColor":"#2563eb","edgeLabelBackground":"#f8fafc"}} }%%
@@ -262,6 +257,14 @@ flowchart TB
 | Docker bridge(`tc-network`) | VPC/Subnet 내 워크로드 네트워크 |
 | `host.docker.internal`/host 포트 | 내부 LB 주소, Private Endpoint, NAT 경유 주소 |
 | 로컬 Docker 소켓 제어 | CSP 정책에 맞는 런타임 제어 경로(대개 K8s API 기반) |
+
+### Janitor 로그 소스 구분
+
+| app 라벨 | 실행 주체 | 용도 |
+|----------|-----------|------|
+| `cloud-janitor` | Deployment (API 서버) | 등록 API, 수동 스캔 실행 로그, 서비스 상태 로그 |
+| `cloud-janitor-scanner` | CronJob (주기 스캔) | 자동 주기 스캔 결과 로그 (`SCAN_CYCLE_*`, `SCAN_CONTAINER`) |
+| `cloud-janitor-cleanup` | CronJob (주기 정리) | 유예기간 만료 대상 정리 로그 (`CLEANUP_*`) |
 
 ## 🛠 Tech Stack
 
