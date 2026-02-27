@@ -37,6 +37,67 @@ flowchart LR
 
 ## 2. 네트워크 동작 방식
 
+### 2.0 End-to-End 네트워크 플로우
+
+```mermaid
+flowchart LR
+    subgraph TC["TC Host (Docker)"]
+      direction TB
+      subgraph TCN["tc-network (bridge)"]
+        direction LR
+        APPS["TC workload containers"]
+        CAD["cAdvisor :8080"]
+        TPROM["target-prometheus :9090<br>(host: 9091/19091/29091/39091 중 자동 선택)"]
+        TPTL["Promtail (tc-docker logs)"]
+      end
+      APPS -->|"container metrics"| CAD
+      CAD -->|"scrape"| TPROM
+      APPS -->|"container logs"| TPTL
+    end
+
+    subgraph CJ["CJ Host (kind Kubernetes)"]
+      direction TB
+
+      subgraph CJDEF["default namespace"]
+        direction LR
+        JAN["cloud-janitor API<br>NodePort 30800 -> Pod 8000"]
+      end
+
+      subgraph CJMON["monitoring namespace"]
+        direction LR
+        CJPTL["CJ Promtail (Helm)"]
+        LOKI["Loki<br>NodePort 31000 -> 3100"]
+        GRAF["Grafana<br>NodePort 30080 (host:3000)"]
+      end
+
+      subgraph CJDB["mysql namespace"]
+        direction LR
+        MYSQL[("MySQL<br/>ClusterIP 3306 + NodePort 30306 (host:3306)")]
+      end
+
+      subgraph CJTNS["tc-<name> namespace"]
+        direction LR
+        TCSVC["prometheus Service + Endpoints<br>-> TC target-prometheus:9090"]
+      end
+    end
+
+    TPTL -->|"HTTP push /loki/api/v1/push"| LOKI
+
+    JAN -->|"PromQL 조회"| TCSVC
+    TCSVC -.->|"Endpoint 라우팅"| TPROM
+    JAN -->|"Docker API (unix:///var/run/docker.sock or tcp://)"| APPS
+    JAN -->|"삭제/스캔 상태 저장"| MYSQL
+
+    JAN -->|"stdout logs"| CJPTL
+    CJPTL -->|"HTTP push"| LOKI
+
+    GRAF -->|"query"| LOKI
+    GRAF -->|"query"| TCSVC
+    GRAF -->|"query"| MYSQL
+
+    style CJTNS stroke-dasharray: 6 4
+```
+
 ### 2.1 Metrics Plane
 
 1. TC 컨테이너 메트릭이 `cAdvisor`에서 노출됩니다.  

@@ -656,8 +656,126 @@ def get_zombie_by_id(zombie_id):
         conn.close()
 
 
+def _is_container_not_found_error(message):
+    text = str(message or "").lower()
+    return "not found" in text or "no such container" in text or "404" in text
+
+
+def _is_container_not_running_error(message):
+    text = str(message or "").lower()
+    return "is not running" in text or "already stopped" in text
+
+
+def _stop_container_runtime(container_refs, docker_url):
+    """Stop container via Docker SDK first, then docker CLI fallback."""
+    refs = []
+    for ref in container_refs or []:
+        value = str(ref or "").strip()
+        if value and value not in refs:
+            refs.append(value)
+
+    if not refs:
+        return {"success": False, "error": "no container reference available"}
+
+    resolved_url = str(
+        docker_url or os.getenv("DOCKER_API_URL", "unix:///var/run/docker.sock")
+    ).strip() or "unix:///var/run/docker.sock"
+
+    errors = []
+
+    # Preferred: Docker SDK (supports remote DOCKER_API_URL).
+    try:
+        import docker
+
+        client = docker.DockerClient(base_url=resolved_url)
+        try:
+            for ref in refs:
+                try:
+                    container = client.containers.get(ref)
+                    state = str(
+                        ((container.attrs or {}).get("State") or {}).get("Status")
+                        or container.status
+                        or ""
+                    ).lower()
+                    if state in {"exited", "dead", "created", "removing"}:
+                        return {
+                            "success": True,
+                            "already_stopped": True,
+                            "container_ref": ref,
+                            "method": "docker-sdk",
+                            "runtime_state": state or "stopped",
+                        }
+                    container.stop(timeout=10)
+                    return {
+                        "success": True,
+                        "already_stopped": False,
+                        "container_ref": ref,
+                        "method": "docker-sdk",
+                        "runtime_state": "stopped",
+                    }
+                except Exception as e:
+                    msg = str(e)
+                    if _is_container_not_running_error(msg):
+                        return {
+                            "success": True,
+                            "already_stopped": True,
+                            "container_ref": ref,
+                            "method": "docker-sdk",
+                            "runtime_state": "not_running",
+                        }
+                    if _is_container_not_found_error(msg):
+                        errors.append(f"{ref}: not found")
+                        continue
+                    errors.append(f"{ref}: {msg}")
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+    except Exception as e:
+        errors.append(f"docker sdk init failed: {e}")
+
+    # Fallback: docker CLI.
+    if not shutil.which("docker"):
+        detail = "; ".join(errors) if errors else "docker sdk/cli unavailable"
+        return {"success": False, "error": detail}
+
+    for ref in refs:
+        cmd = ["docker", "-H", resolved_url, "stop", str(ref)]
+        result = subprocess.run(
+            cmd,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=20,
+        )
+        output = (result.stderr or result.stdout or "").strip()
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "already_stopped": False,
+                "container_ref": ref,
+                "method": "docker-cli",
+                "runtime_state": "stopped",
+            }
+        if _is_container_not_running_error(output):
+            return {
+                "success": True,
+                "already_stopped": True,
+                "container_ref": ref,
+                "method": "docker-cli",
+                "runtime_state": "not_running",
+            }
+        if _is_container_not_found_error(output):
+            errors.append(f"{ref}: not found")
+            continue
+        errors.append(f"{ref}: {output or f'cli returncode={result.returncode}'}")
+
+    return {"success": False, "error": "; ".join(errors) or "docker stop failed"}
+
+
 def stop_zombie(zombie_id, config=None):
-    """Mark a pending zombie as STOPPED (manual stop action)."""
+    """Stop runtime container and mark lifecycle row as STOPPED."""
     zombie = get_zombie_by_id(zombie_id)
     if not zombie:
         return {"success": False, "error": "zombie not found"}
@@ -673,6 +791,38 @@ def stop_zombie(zombie_id, config=None):
 
     if zombie["status"] != "PENDING":
         return {"success": False, "error": f"zombie status is {zombie['status']}, not PENDING"}
+
+    docker_url = (config or {}).get("DOCKER_API_URL", os.getenv("DOCKER_API_URL", "unix:///var/run/docker.sock"))
+    container_refs = []
+    if zombie.get("short_id"):
+        container_refs.append(zombie["short_id"])
+    if zombie.get("container_name"):
+        container_refs.append(zombie["container_name"])
+
+    stop_result = _stop_container_runtime(container_refs, docker_url)
+    if not stop_result.get("success"):
+        conn = _get_connection(config)
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE zombie_lifecycle
+                   SET last_error = %s,
+                       updated_at = UTC_TIMESTAMP()
+                 WHERE id = %s
+                """,
+                (str(stop_result.get("error", "docker stop failed"))[:1000], zombie_id),
+            )
+            conn.commit()
+        finally:
+            cursor.close()
+            conn.close()
+        return {
+            "success": False,
+            "error": stop_result.get("error", "docker stop failed"),
+            "container_name": zombie["container_name"],
+            "tc_name": zombie["tc_name"],
+        }
 
     conn = _get_connection(config)
     cursor = conn.cursor()
@@ -697,6 +847,11 @@ def stop_zombie(zombie_id, config=None):
                 "container_name": zombie["container_name"],
                 "tc_name": zombie["tc_name"],
                 "status": "STOPPED",
+                "runtime_stopped": True,
+                "already_stopped": bool(stop_result.get("already_stopped", False)),
+                "container_ref": stop_result.get("container_ref"),
+                "stop_method": stop_result.get("method"),
+                "runtime_state": stop_result.get("runtime_state"),
             }
         return {"success": False, "error": "zombie not found or not pending"}
     finally:
