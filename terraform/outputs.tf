@@ -9,7 +9,7 @@ output "kubeconfig_path" {
 
 output "grafana_url" {
   description = "Grafana 접속 주소"
-  value       = "http://localhost:3000"
+  value       = "http://localhost:${local.grafana_host_port}"
 }
 
 output "prometheus_url" {

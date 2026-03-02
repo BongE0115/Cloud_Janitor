@@ -54,12 +54,12 @@ resource "kind_cluster" "default" {
       # Prometheus는 Target Cluster에서 별도로 실행되므로 포트 매핑 제거
       extra_port_mappings {
         container_port = 30080 # Grafana NodePort
-        host_port      = 3000  # localhost:3000
+        host_port      = local.grafana_host_port
       }
 
       extra_port_mappings {
         container_port = 30306 # MySQL NodePort
-        host_port      = 3306  # localhost:3306
+        host_port      = local.mysql_host_port
       }
 
       extra_port_mappings {

@@ -241,7 +241,7 @@ services:
   inference-metrics-aggregator:
     image: alpine:latest
     container_name: inference-metrics-aggregator
-    restart: unless-stoppeddd if=/dev/zero of=/tmp/dummy
+    restart: unless-stopped
     networks:
       - target-network
     labels:

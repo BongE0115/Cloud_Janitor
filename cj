@@ -201,6 +201,17 @@ load_cj_env() {
     done < "$env_file"
 }
 
+get_grafana_host_port() {
+    load_cj_env
+    echo "${GRAFANA_HOST_PORT:-3000}"
+}
+
+get_grafana_host_url() {
+    local grafana_port
+    grafana_port="$(get_grafana_host_port)"
+    echo "http://localhost:${grafana_port}"
+}
+
 # SSH 터널 설정
 setup_ssh_tunnel() {
     load_cj_env
@@ -958,8 +969,10 @@ cmd_setup() {
 
     log_step "🎉 전체 설정 완료"
     echo ""
+    local grafana_url
+    grafana_url="$(get_grafana_host_url)"
     log_info "접속 정보:"
-    echo "   📈 Grafana (Mgmt):     http://localhost:3000"
+    echo "   📈 Grafana (Mgmt):     $grafana_url"
     echo "   🐍 CJ API:             http://localhost:30800 (cj start 이후)"
     echo ""
     log_info "상태 확인:"
@@ -1421,7 +1434,9 @@ cmd_scan() {
 # =============================================================================
 
 cmd_grafana() {
-    log_info "Grafana 접속: http://localhost:3000"
+    local grafana_url
+    grafana_url="$(get_grafana_host_url)"
+    log_info "Grafana 접속: $grafana_url"
     
     # .env 파일 로드
     if [ -f "$CJ_HOME/.env" ]; then
@@ -1432,11 +1447,11 @@ cmd_grafana() {
     fi
 
     if command -v xdg-open &> /dev/null; then
-        xdg-open http://localhost:3000
+        xdg-open "$grafana_url"
     elif command -v open &> /dev/null; then
-        open http://localhost:3000
+        open "$grafana_url"
     else
-        log_info "브라우저를 직접 열어주세요: http://localhost:3000"
+        log_info "브라우저를 직접 열어주세요: $grafana_url"
     fi
 }
 
@@ -1508,11 +1523,13 @@ cmd_bootstrap() {
     
     log_step "✅ Cloud Janitor Bootstrap 완료!"
     echo ""
+    local grafana_url
+    grafana_url="$(get_grafana_host_url)"
     echo "=========================================="
     echo "  🎉 서비스 접속 정보"
     echo "=========================================="
     echo ""
-    echo "  📈 Grafana:      http://localhost:3000"
+    echo "  📈 Grafana:      $grafana_url"
     echo "     ID: admin"
     echo "     PW: changeme (또는 .env에서 설정한 값)"
     echo ""

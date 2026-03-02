@@ -8,6 +8,8 @@ locals {
     if !startswith(trimspace(line), "#") && length(trimspace(line)) > 0 && length(regexall("=", line)) > 0
   }
 
-  grafana_password = local.env_file["GRAFANA_PASSWORD"]
-  smtp_password   = local.env_file["SMTP_PASSWORD"]
+  grafana_password  = local.env_file["GRAFANA_PASSWORD"]
+  smtp_password     = local.env_file["SMTP_PASSWORD"]
+  grafana_host_port = try(tonumber(local.env_file["GRAFANA_HOST_PORT"]), 3000)
+  mysql_host_port   = try(tonumber(local.env_file["MYSQL_HOST_PORT"]), 3306)
 }

@@ -39,6 +39,10 @@
       ansible.builtin.set_fact:
         grafana_admin_password: "{{ env_vars['GRAFANA_PASSWORD'] }}"
 
+    - name: Set Grafana host URL from .env host port
+      ansible.builtin.set_fact:
+        grafana_url: "http://localhost:{{ env_vars['GRAFANA_HOST_PORT'] | default('3000') }}"
+
     - name: Verify GRAFANA_PASSWORD is set in .env
       ansible.builtin.assert:
         that:
