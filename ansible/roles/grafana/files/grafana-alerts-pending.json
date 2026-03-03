@@ -14,7 +14,7 @@
   },
   "annotations": {
     "summary": "[Cloud Janitor] 삭제 예정 컨테이너 감지",
-    "description": "삭제 예정(PENDING) 컨테이너가 {{ $values.B.Value }}개 감지되었습니다.\n\n🔗 대시보드: http://YOUR_CJ_HOST:30800/ui/zombies"
+    "description": "삭제 예정(PENDING) 컨테이너가 {{ $values.B.Value }}개 감지되었습니다.\n\n🔗 대시보드: http://YOUR_CJ_HOST:30800/ui/containers"
   },
   "data": [
     {
